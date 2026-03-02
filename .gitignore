@@ -21,6 +21,7 @@ lifequest_backup_*.json
 build/
 dist/
 LifeQuest_Release/
+LifeQuest_Release_v2/
 # 注意：保留 .spec 文件是有好处的，它是打包的配方
 # *.spec 
 
