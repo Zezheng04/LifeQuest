@@ -1,0 +1,34 @@
+# --- Python 基础忽略 ---
+__pycache__/
+*.pyc
+
+# --- 虚拟环境 (绝对不能传) ---
+venv*/
+.venv/
+env/
+
+# --- 数据库与个人存档 ---
+*.db
+*.sqlite3
+lifequest.db
+
+# --- 配置文件与个人备份 ---
+config.json
+lifequest_backup_*.json
+进度备忘录.txt
+
+# --- 打包生成文件 (不要传 exe) ---
+build/
+dist/
+LifeQuest_Release/
+# 注意：保留 .spec 文件是有好处的，它是打包的配方
+# *.spec 
+
+# --- IDE 编辑器配置 ---
+.vscode/
+.idea/
+.cursor/
+
+# --- 操作系统生成垃圾文件 ---
+.DS_Store
+Thumbs.db
