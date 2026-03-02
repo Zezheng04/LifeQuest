@@ -1,6 +1,5 @@
 ﻿"""
 LifeQuest - PyQt6 游戏风格主界面
-新增：四维属性完全自定义(JSON配置)、引入本地自定义WAV音效系统。
 """
 import math
 import sys
@@ -8,6 +7,7 @@ import json
 import os
 from datetime import datetime
 from typing import Optional
+from collections import defaultdict
 
 from PyQt6.QtCore import (
     Qt, QPropertyAnimation, QEasingCurve, QSequentialAnimationGroup, 
@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
     QLabel, QProgressBar, QFrame, QScrollArea, QCheckBox, QSplitter, 
     QGridLayout, QPushButton, QDialog, QDialogButtonBox, QFormLayout, 
     QLineEdit, QComboBox, QSpinBox, QMessageBox, QTableWidget, QTableWidgetItem,
-    QGraphicsOpacityEffect, QDateEdit, QGroupBox,QTreeWidget,QHeaderView
+    QGraphicsOpacityEffect, QDateEdit, QGroupBox, QTreeWidget, QHeaderView, QTreeWidgetItem, QFileDialog
 )
 from PyQt6.QtGui import QPainter, QPen, QBrush, QColor, QFont, QPainterPath
 
@@ -26,10 +26,7 @@ from PyQt6.QtGui import QPainter, QPen, QBrush, QColor, QFont, QPainterPath
 from PyQt6.QtMultimedia import QSoundEffect
 
 from database import DatabaseManager
-from models import Player, Rival, Quest, QuestStatus, QuestType, QuestAttribute
-
-
-from collections import defaultdict
+from models import Player, Rival, Quest, QuestStatus, QuestType, QuestAttribute, RivalTier
 
 # ---------- 本地配置系统 ----------
 CONFIG_FILE = "config.json"
@@ -46,7 +43,6 @@ def load_config():
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             user_config = json.load(f)
-            # 合并默认配置，防止老版本配置缺失新字段
             for k, v in default_config.items():
                 if k not in user_config:
                     user_config[k] = v
@@ -61,7 +57,6 @@ def save_config(data):
 class SoundManager:
     def __init__(self):
         self.sounds = {}
-        # 预加载三个核心音效文件
         self._load_sound("success", "success.wav")
         self._load_sound("crit", "crit.wav")
         self._load_sound("fail", "fail.wav")
@@ -71,7 +66,6 @@ class SoundManager:
         path = os.path.abspath(filename)
         if os.path.exists(path):
             effect.setSource(QUrl.fromLocalFile(path))
-            # 可以通过 effect.setVolume(0.8) 调节音量 (0.0 到 1.0)
             self.sounds[name] = effect
         else:
             self.sounds[name] = None
@@ -81,7 +75,6 @@ class SoundManager:
         if effect:
             effect.play()
         else:
-            # 文件不存在时，降级使用系统提示音
             QApplication.beep()
 
 # ---------- 经验条动画辅助 ----------
@@ -129,7 +122,6 @@ class FloatingText(QLabel):
 class AttributeRadarWidget(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
-        # 稍微放大一点最小尺寸，给四周留足空间
         self.setMinimumSize(280, 280)
         self.p_stats = [5.0, 5.0, 5.0, 5.0]
         self.r_stats = [5.0, 5.0, 5.0, 5.0]
@@ -137,16 +129,12 @@ class AttributeRadarWidget(QFrame):
         self.attr_labels = ["属性2", "属性4", "属性3", "属性1"]
 
     def set_attributes(self, p: Player, r: Rival, config: dict):
-        # 对应关系: 上(Insight), 右(Charisma), 下(Logic), 左(Perception)
         self.p_stats = [p.insight, p.charisma, p.logic, p.perception]
         self.r_stats = [r.insight, r.charisma, r.logic, r.perception]
         self._max_val = max(10.0, max(self.p_stats), max(self.r_stats)) + 2.0
         
         self.attr_labels = [
-            config["attr2"], # 上
-            config["attr4"], # 右
-            config["attr3"], # 下
-            config["attr1"]  # 左
+            config["attr2"], config["attr4"], config["attr3"], config["attr1"]
         ]
         self.update()
 
@@ -154,21 +142,15 @@ class AttributeRadarWidget(QFrame):
         super().paintEvent(event)
         w, h = self.width(), self.height()
         cx, cy = w / 2, h / 2
-
-        # 核心修复 1：把雷达的最大半径缩小，强制给四周边缘留出 45 像素的空间放文字
         r = min(w, h) / 2 - 45
-
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        # 核心修复 2：修正顶点角度，标准的上、右、下、左
         angles = [-90, 0, 90, 180]
 
         def get_pt(radius, angle):
             rad = math.radians(angle)
             return cx + radius * math.cos(rad), cy + radius * math.sin(rad)
 
-        # 1. 画背景网格 (修复断线问题)
         pen_grid = QPen(QColor(60, 80, 70))
         pen_grid.setWidth(1)
         painter.setPen(pen_grid)
@@ -181,12 +163,10 @@ class AttributeRadarWidget(QFrame):
             path.closeSubpath()
             painter.drawPath(path)
 
-        # 2. 画十字轴线
         for ang in angles:
             px, py = get_pt(r, ang)
             painter.drawLine(int(cx), int(cy), int(px), int(py))
 
-        # 3. 数据多边形生成函数
         def get_data_path(stats):
             path = QPainterPath()
             for i, val in enumerate(stats):
@@ -197,19 +177,16 @@ class AttributeRadarWidget(QFrame):
             path.closeSubpath()
             return path
 
-        # 4. 画对手 (红色底层)
         r_path = get_data_path(self.r_stats)
         painter.fillPath(r_path, QBrush(QColor(200, 50, 50, 70)))
         painter.setPen(QPen(QColor(255, 80, 80), 2))
         painter.drawPath(r_path)
 
-        # 5. 画玩家 (绿色表层)
         p_path = get_data_path(self.p_stats)
         painter.fillPath(p_path, QBrush(QColor(0, 180, 120, 100)))
         painter.setPen(QPen(QColor(0, 255, 160), 2))
         painter.drawPath(p_path)
 
-        # 6. 画边缘文字 (核心修复 3：智能对齐防遮挡)
         painter.setPen(QColor(200, 255, 200))
         font = QFont(self.font())
         font.setPointSize(10)
@@ -221,22 +198,11 @@ class AttributeRadarWidget(QFrame):
             text = self.attr_labels[i]
             tw = metrics.horizontalAdvance(text)
             th = metrics.height()
-            
-            # 文字离雷达的最外圈顶点再向外延展 12 像素
             px, py = get_pt(r + 12, ang)
-
-            # 根据文字在四个不同的方向，做对应的居中偏移修正
-            if ang == -90:   # 上方文字，水平居中
-                px -= tw / 2
-            elif ang == 0:   # 右侧文字，垂直居中
-                py += th / 3
-            elif ang == 90:  # 下方文字，水平居中，并向下让出字高
-                px -= tw / 2
-                py += th
-            elif ang == 180: # 左侧文字，向左让出整个字宽，垂直居中
-                px -= tw
-                py += th / 3
-
+            if ang == -90: px -= tw / 2
+            elif ang == 0: py += th / 3
+            elif ang == 90: px -= tw / 2; py += th
+            elif ang == 180: px -= tw; py += th / 3
             painter.drawText(int(px), int(py), text)
 
 # ---------- 全局 QSS 样式 ----------
@@ -245,7 +211,6 @@ def get_stylesheet() -> str:
     QMainWindow, QWidget { background-color: #0d1117; color: #c9d1d9; }
     QMessageBox { background-color: #161b22; }
     QMessageBox QLabel { color: #c9d1d9; font-size: 14px; }
-    QMessageBox QPushButton { min-width: 80px; }
     QGroupBox { border: 1px solid #30363d; border-radius: 6px; margin-top: 10px; padding-top: 15px; font-weight: bold; color: #7ee787;}
     QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px 0 5px; }
     QFrame#statusFrame, QFrame#questFrame, QFrame#attrFrame { background-color: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 8px; }
@@ -261,21 +226,17 @@ def get_stylesheet() -> str:
     QCheckBox::indicator { width: 20px; height: 20px; border: 2px solid #7ee787; border-radius: 4px; background-color: #21262d; }
     QCheckBox::indicator:checked { background-color: #238636; border-color: #7ee787; }
     QScrollArea { border: none; background-color: transparent; }
-    QScrollBar:vertical { background: #21262d; width: 10px; border-radius: 5px; margin: 0; }
-    QScrollBar::handle:vertical { background: #388bfd; border-radius: 5px; min-height: 24px; }
     QPushButton { background-color: #21262d; color: #7ee787; border: 1px solid #30363d; border-radius: 6px; padding: 8px 16px; font-weight: bold; }
     QPushButton:hover { background-color: #30363d; border-color: #7ee787; }
     QPushButton:pressed { background-color: #238636; }
     QPushButton#abandonBtn { color: #f85149; border-color: #da3633; }
     QPushButton#abandonBtn:hover { background-color: #da3633; color: white;}
-    QPushButton#editBtn { background-color: transparent; border: none; font-size: 16px; padding: 0;}
-    QPushButton#editBtn:hover { background-color: #30363d; border-radius: 4px;}
     QLineEdit, QComboBox, QSpinBox, QDateEdit { background-color: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 4px; padding: 6px; min-height: 20px; }
-    QTableWidget { background-color: #161b22; color: #c9d1d9; gridline-color: #30363d; }
+    QTableWidget, QTreeWidget { background-color: #161b22; color: #c9d1d9; gridline-color: #30363d; border: 1px solid #30363d;}
     QHeaderView::section { background-color: #21262d; color: white; border: 1px solid #30363d; padding: 4px;}
     """
 
-# ---------- 目标设置对话框 (包含自定义属性) ----------
+# ---------- 目标设置对话框 ----------
 class TargetSettingsDialog(QDialog):
     def __init__(self, config, parent=None):
         super().__init__(parent)
@@ -283,7 +244,6 @@ class TargetSettingsDialog(QDialog):
         self.setStyleSheet(get_stylesheet())
         layout = QVBoxLayout(self)
         
-        # 1. 主线目标设置
         group_target = QGroupBox("竞速目标设定")
         form1 = QFormLayout(group_target)
         self.name_edit = QLineEdit(config["target_name"])
@@ -294,7 +254,6 @@ class TargetSettingsDialog(QDialog):
         form1.addRow("决战日期:", self.date_edit)
         layout.addWidget(group_target)
 
-        # 2. 四维属性名称自定义
         group_attr = QGroupBox("四维成长体系自定义")
         form2 = QFormLayout(group_attr)
         self.attr1_edit = QLineEdit(config["attr1"])
@@ -307,6 +266,14 @@ class TargetSettingsDialog(QDialog):
         form2.addRow("属性槽 4:", self.attr4_edit)
         layout.addWidget(group_attr)
         
+        # 新增：对手设置
+        group_rival = QGroupBox("宿敌设定 (难度)")
+        form3 = QFormLayout(group_rival)
+        self.rival_tier_combo = QComboBox()
+        self.rival_tier_combo.addItems([t.value for t in RivalTier])
+        form3.addRow("对手类型:", self.rival_tier_combo)
+        layout.addWidget(group_rival)
+
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -319,12 +286,16 @@ class TargetSettingsDialog(QDialog):
             "attr1": self.attr1_edit.text(),
             "attr2": self.attr2_edit.text(),
             "attr3": self.attr3_edit.text(),
-            "attr4": self.attr4_edit.text()
+            "attr4": self.attr4_edit.text(),
+            "rival_tier": self.rival_tier_combo.currentText()
         }
 
-# ---------- 历史卷宗对话框 ----------
-from PyQt6.QtWidgets import QFileDialog, QTreeWidgetItem  # 确保头部引入了这两个组件
+    def set_current_tier(self, tier_str):
+        index = self.rival_tier_combo.findText(tier_str)
+        if index >= 0:
+            self.rival_tier_combo.setCurrentIndex(index)
 
+# ---------- 历史卷宗对话框 ----------
 class QuestHistoryDialog(QDialog):
     def __init__(self, db: DatabaseManager, config: dict, parent=None):
         super().__init__(parent)
@@ -332,75 +303,31 @@ class QuestHistoryDialog(QDialog):
         self.config = config
         self.setWindowTitle("📜 历史卷宗 (Chronicles)")
         self.resize(800, 600)
-        
-        # 使用 QSS 增强树状列表的样式，使其符合 Cyberpunk 风格
         self.setStyleSheet(get_stylesheet() + """
-            QTreeWidget {
-                background-color: #0d1117;
-                border: 1px solid #30363d;
-                font-size: 14px;
-                outline: none;
-            }
-            QTreeWidget::item { 
-                padding: 8px; 
-                border-bottom: 1px solid #21262d;
-            }
-            QTreeWidget::item:selected {
-                background-color: #1f6feb; /* 选中高亮蓝 */
-                color: white;
-            }
-            QTreeWidget::branch:has-children:!has-siblings:closed,
-            QTreeWidget::branch:closed:has-children:has-siblings {
-                border-image: none;
-                image: none; /* 可以根据需要加箭头图标 */
-            }
-            QLabel { color: #8b949e; }
+            QTreeWidget { background-color: #0d1117; border: 1px solid #30363d; font-size: 14px; outline: none; }
+            QTreeWidget::item { padding: 8px; border-bottom: 1px solid #21262d; }
+            QTreeWidget::item:selected { background-color: #1f6feb; color: white; }
         """)
-
         layout = QVBoxLayout(self)
-
-        # --- 顶部工具栏 ---
         top_layout = QHBoxLayout()
         info_label = QLabel("查看你的征程与战绩 (按日期归档)")
         info_label.setStyleSheet("font-style: italic; font-weight: bold;")
-        
-        # 💾 导出备份按钮：解决数据安全焦虑
         export_btn = QPushButton("💾 导出备份 (JSON)")
-        export_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        export_btn.setStyleSheet("""
-            QPushButton { 
-                color: #7ee787; 
-                border: 1px solid #238636; 
-                background-color: #161b22;
-            }
-            QPushButton:hover { background-color: #238636; color: white; }
-        """)
         export_btn.clicked.connect(self._export_history)
-        
         top_layout.addWidget(info_label)
         top_layout.addStretch()
         top_layout.addWidget(export_btn)
         layout.addLayout(top_layout)
 
-        # --- 核心数据展示区域 (树状列表) ---
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["时间 / 任务名称", "类型", "属性加成", "战利品"])
-        self.tree.setColumnWidth(0, 350) # 让第一列宽一点
+        self.tree.setColumnWidth(0, 350) 
         self.tree.setAlternatingRowColors(True)
-        # 隐藏根节点的折叠图标所在列的缩进，使外观更整洁
         self.tree.setRootIsDecorated(True) 
         layout.addWidget(self.tree)
-
-        # --- 底部按钮 ---
-        btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        btn_box.rejected.connect(self.reject)
-        layout.addWidget(btn_box)
-
-        # 加载数据
         self._load_history()
 
     def _get_attr_name(self, attr_enum_val):
-        """将内部属性枚举值映射为用户自定义的名称"""
         mapping = {
             QuestAttribute.PERCEPTION.value: self.config["attr1"],
             QuestAttribute.INSIGHT.value: self.config["attr2"],
@@ -410,92 +337,48 @@ class QuestHistoryDialog(QDialog):
         return mapping.get(attr_enum_val, attr_enum_val)
 
     def _load_history(self):
-        """核心逻辑：从数据库读取已完成任务，并按日期分组显示"""
         self.tree.clear()
-        
-        # 1. 获取所有已完成任务
         quests = self.db.list_quests(status=QuestStatus.COMPLETE)
-        # 按完成时间倒序排列（最近的在上面）
         quests.sort(key=lambda x: x.completed_at or "", reverse=True)
-        
-        # 2. 按日期分组数据
         grouped_data = defaultdict(list)
         for q in quests:
             if q.completed_at:
-                date_str = q.completed_at.split(" ")[0] # 提取 "2023-10-27"
-                time_str = q.completed_at.split(" ")[1] # 提取 "14:30"
+                date_str = q.completed_at.split(" ")[0]
+                time_str = q.completed_at.split(" ")[1]
             else:
-                date_str = "未知日期"
-                time_str = "--:--"
+                date_str = "未知日期"; time_str = "--:--"
             grouped_data[date_str].append((time_str, q))
 
-        # 3. 构建树状节点
         for date_key, items in grouped_data.items():
-            # --- 创建日期父节点 ---
             date_node = QTreeWidgetItem(self.tree)
             date_node.setText(0, f"📅 {date_key} (完成 {len(items)} 个任务)")
-            # 设置父节点样式：加粗，略微灰色背景
-            font = date_node.font(0)
-            font.setBold(True)
-            date_node.setFont(0, font)
+            font = date_node.font(0); font.setBold(True); date_node.setFont(0, font)
             date_node.setForeground(0, QBrush(QColor("#8b949e"))) 
-            
-            # --- 创建任务子节点 ---
             for time_str, q in items:
                 item = QTreeWidgetItem(date_node)
-                
-                # 第一列：时间 + 名称
                 item.setText(0, f"[{time_str}] {q.name}")
                 item.setForeground(0, QBrush(QColor("#c9d1d9")))
-                
-                # 第二列：类型
                 item.setText(1, q.quest_type.value)
                 if q.quest_type == QuestType.MAIN:
-                    item.setForeground(1, QBrush(QColor("#f0883e"))) # 主线任务橙色高亮
-                
-                # 第三列：属性
+                    item.setForeground(1, QBrush(QColor("#f0883e")))
                 attr_name = self._get_attr_name(q.attribute.value)
                 item.setText(2, attr_name)
                 item.setForeground(2, QBrush(QColor("#79c0ff")))
-                
-                # 第四列：战利品 (计算 XP 和 金币)
-                # 注意：这里我们简单反推显示的数值，实际数值在数据库完成时已结算
-                xp = 20 + q.difficulty * 15
-                gold = 10 + q.difficulty * 5
+                xp = 20 + q.difficulty * 15; gold = 10 + q.difficulty * 5
                 item.setText(3, f"✨+{xp} / 🪙+{gold}")
-                item.setForeground(3, QBrush(QColor("#7ee787"))) # 绿色代表收益
-
-            # 默认展开所有日期
+                item.setForeground(3, QBrush(QColor("#7ee787")))
             date_node.setExpanded(True)
 
     def _export_history(self):
-        """将历史记录导出为 JSON 文件，实现数据独立备份"""
-        file_path, _ = QFileDialog.getSaveFileName(
-            self, "导出备份", f"lifequest_backup_{datetime.now().strftime('%Y%m%d')}.json", "JSON Files (*.json)"
-        )
-        
+        file_path, _ = QFileDialog.getSaveFileName(self, "导出备份", f"lifequest_backup_{datetime.now().strftime('%Y%m%d')}.json", "JSON Files (*.json)")
         if file_path:
             try:
                 quests = self.db.list_quests(status=QuestStatus.COMPLETE)
-                export_data = []
-                for q in quests:
-                    # 将对象转为字典
-                    q_dict = {
-                        "name": q.name,
-                        "desc": q.description,
-                        "type": q.quest_type.value,
-                        "attr": q.attribute.value,
-                        "diff": q.difficulty,
-                        "completed_at": q.completed_at
-                    }
-                    export_data.append(q_dict)
-                
-                with open(file_path, "w", encoding="utf-8") as f:
-                    json.dump(export_data, f, ensure_ascii=False, indent=4)
-                
-                QMessageBox.information(self, "成功", f"历史记录已成功备份至：\n{file_path}\n\n即使删除数据库文件，此备份依然安全。")
-            except Exception as e:
-                QMessageBox.critical(self, "错误", f"导出失败: {str(e)}")
+                export_data = [{"name": q.name, "completed_at": q.completed_at} for q in quests]
+                with open(file_path, "w", encoding="utf-8") as f: json.dump(export_data, f, ensure_ascii=False, indent=4)
+                QMessageBox.information(self, "成功", f"备份已保存至：\n{file_path}")
+            except Exception as e: QMessageBox.critical(self, "错误", str(e))
+
 # ---------- 添加任务对话框 ----------
 class AddQuestDialog(QDialog):
     def __init__(self, config, parent=None):
@@ -512,12 +395,9 @@ class AddQuestDialog(QDialog):
         form.addRow("描述", self.desc_edit)
         self.type_combo = QComboBox(); self.type_combo.addItems([QuestType.DAILY.value, QuestType.MAIN.value])
         form.addRow("类型", self.type_combo)
-        
-        # 动态加载自定义属性名
         self.attr_combo = QComboBox()
         self.attr_combo.addItems([config["attr1"], config["attr2"], config["attr3"], config["attr4"]])
         form.addRow("对应属性", self.attr_combo)
-        
         self.difficulty_spin = QSpinBox(); self.difficulty_spin.setRange(1, 5); self.difficulty_spin.setValue(2)
         form.addRow("难度 (1-5)", self.difficulty_spin)
         layout.addLayout(form)
@@ -532,18 +412,102 @@ class AddQuestDialog(QDialog):
         name = self.name_edit.text().strip()
         desc = self.desc_edit.text().strip()
         if not name: return None
-        
-        # 根据选择的文本反推对应的内部属性槽
         selected_text = self.attr_combo.currentText()
         if selected_text == self.config["attr1"]: attr = QuestAttribute.PERCEPTION
         elif selected_text == self.config["attr2"]: attr = QuestAttribute.INSIGHT
         elif selected_text == self.config["attr3"]: attr = QuestAttribute.LOGIC
         else: attr = QuestAttribute.CHARISMA
-            
         qt = QuestType.DAILY if self.type_combo.currentText() == QuestType.DAILY.value else QuestType.MAIN
         diff = self.difficulty_spin.value()
         return (name, desc or name, qt, attr, diff)
 
+# ---------- 商店对话框 ----------
+class ShopDialog(QDialog):
+    def __init__(self, db: DatabaseManager, parent=None):
+        super().__init__(parent)
+        self.db = db
+        self.setWindowTitle("🛒 战利品商店")
+        self.resize(500, 400)
+        self.setStyleSheet(get_stylesheet())
+        
+        layout = QVBoxLayout(self)
+        self.gold_label = QLabel(f"你的赏金: 🪙 {self.db.get_player().gold}")
+        self.gold_label.setStyleSheet("color: #f0d84a; font-size: 18px; font-weight: bold;")
+        layout.addWidget(self.gold_label)
+        
+        self.table = QTableWidget()
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(["商品 / 欲望", "价格", "操作"])
+        self.table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(self.table)
+        
+        add_layout = QHBoxLayout()
+        self.new_item_name = QLineEdit(); self.new_item_name.setPlaceholderText("自定义奖励 (如: 喝奶茶)")
+        self.new_item_cost = QSpinBox(); self.new_item_cost.setRange(10, 9999); self.new_item_cost.setValue(100)
+        add_btn = QPushButton("➕ 上架"); add_btn.clicked.connect(self._add_item)
+        add_layout.addWidget(self.new_item_name, 2)
+        add_layout.addWidget(QLabel("💰"))
+        add_layout.addWidget(self.new_item_cost, 1)
+        add_layout.addWidget(add_btn)
+        layout.addLayout(add_layout)
+        self._refresh_list()
+
+    def _refresh_list(self):
+        self.gold_label.setText(f"你的赏金: 🪙 {self.db.get_player().gold}")
+        rewards = self.db.list_rewards()
+        self.table.setRowCount(len(rewards))
+        for i, r in enumerate(rewards):
+            self.table.setItem(i, 0, QTableWidgetItem(r.name))
+            cost_item = QTableWidgetItem(f"🪙 {r.cost}"); cost_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.setItem(i, 1, cost_item)
+            buy_btn = QPushButton("购买"); buy_btn.setProperty("rid", r.id); buy_btn.clicked.connect(self._buy_item)
+            del_btn = QPushButton("❌"); del_btn.setFixedSize(30, 30); del_btn.setStyleSheet("color: red; border: none;"); del_btn.setProperty("rid", r.id); del_btn.clicked.connect(self._del_item)
+            btn_widget = QWidget(); btn_layout = QHBoxLayout(btn_widget); btn_layout.setContentsMargins(0,0,0,0)
+            btn_layout.addWidget(buy_btn); btn_layout.addWidget(del_btn)
+            self.table.setCellWidget(i, 2, btn_widget)
+
+    def _add_item(self):
+        name = self.new_item_name.text().strip()
+        if not name: return
+        self.db.add_reward(name, self.new_item_cost.value())
+        self.new_item_name.clear()
+        self._refresh_list()
+
+    def _del_item(self):
+        self.db.delete_reward(self.sender().property("rid"))
+        self._refresh_list()
+
+    def _buy_item(self):
+        rid = self.sender().property("rid")
+        success, msg = self.db.buy_reward(rid)
+        
+        if success:
+            QMessageBox.information(self, "成功", msg)
+            # --- 关键修复代码 START ---
+            # 购买成功后，通知父窗口(主界面)刷新 UI
+            if self.parent():
+                self.parent()._refresh_stats()
+            # --- 关键修复代码 END ---
+        else:
+            QMessageBox.warning(self, "失败", msg)
+            
+        self._refresh_list()
+# ---------- 完成任务时长对话框 ----------
+class CompleteQuestDialog(QDialog):
+    def __init__(self, quest_name, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("🎉 任务完成！")
+        self.setStyleSheet(get_stylesheet())
+        self.resize(300, 150)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(f"你完成了: {quest_name}"))
+        layout.addWidget(QLabel("本次专注时长 (分钟):"))
+        self.time_spin = QSpinBox(); self.time_spin.setRange(0, 1440); self.time_spin.setValue(30); self.time_spin.setSuffix(" min")
+        layout.addWidget(self.time_spin)
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(self.accept); btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+    def get_duration(self): return self.time_spin.value()
 
 # ---------- 主窗口 ----------
 class MainWindow(QMainWindow):
@@ -554,7 +518,7 @@ class MainWindow(QMainWindow):
         self.db.init_player_if_missing()
         
         self.config = load_config()
-        self.sfx = SoundManager() # 初始化自定义音效
+        self.sfx = SoundManager()
 
         self._animator: Optional[ProgressBarAnimator] = None
         self._anim_group: Optional[QSequentialAnimationGroup] = None
@@ -577,11 +541,9 @@ class MainWindow(QMainWindow):
         title_layout = QHBoxLayout()
         self.target_title_label = QLabel(f"🏁 {self.config['target_name']}")
         self.target_title_label.setStyleSheet("color: #7ee787; font-size:18px; font-weight:bold;")
-        
         edit_btn = QPushButton("⚙️"); edit_btn.setObjectName("editBtn"); edit_btn.setFixedSize(30, 30)
         edit_btn.clicked.connect(self._open_settings)
         title_layout.addWidget(self.target_title_label); title_layout.addWidget(edit_btn); title_layout.addStretch()
-        
         self.countdown_label = QLabel("距目标还有: 计算中...")
         self.countdown_label.setStyleSheet("color: #ff7b72; font-size:18px; font-weight:bold;")
         title_layout.addWidget(self.countdown_label)
@@ -591,7 +553,12 @@ class MainWindow(QMainWindow):
         self.level_label = QLabel("你 Lv.1"); self.level_label.setObjectName("levelLabel")
         self.xp_bar = QProgressBar(); self.xp_bar.setObjectName("playerBar"); self.xp_bar.setFormat("你的进度: %v / %m")
         self.gold_label = QLabel("🪙 0"); self.gold_label.setObjectName("goldLabel")
-        p_layout.addWidget(self.level_label); p_layout.addWidget(self.xp_bar, 1); p_layout.addWidget(self.gold_label)
+        
+        # 新增：专注时长
+        self.focus_label = QLabel("⏳ 今日专注: 0m")
+        self.focus_label.setStyleSheet("color: #79c0ff; font-weight: bold;")
+        
+        p_layout.addWidget(self.level_label); p_layout.addWidget(self.xp_bar, 1); p_layout.addWidget(self.gold_label); p_layout.addWidget(self.focus_label)
         status_layout.addLayout(p_layout)
 
         r_layout = QHBoxLayout()
@@ -611,7 +578,8 @@ class MainWindow(QMainWindow):
         btn_layout = QHBoxLayout()
         add_btn = QPushButton("➕ 添加任务"); add_btn.clicked.connect(self._on_add_quest)
         hist_btn = QPushButton("📜 历史卷宗"); hist_btn.clicked.connect(lambda: QuestHistoryDialog(self.db, self.config, self).exec())
-        btn_layout.addWidget(add_btn); btn_layout.addWidget(hist_btn)
+        shop_btn = QPushButton("🛒 战利品商店"); shop_btn.clicked.connect(lambda: ShopDialog(self.db, self).exec())
+        btn_layout.addWidget(add_btn); btn_layout.addWidget(hist_btn); btn_layout.addWidget(shop_btn)
         quest_layout.addLayout(btn_layout)
 
         self.quest_scroll = QScrollArea(); self.quest_scroll.setWidgetResizable(True)
@@ -622,36 +590,37 @@ class MainWindow(QMainWindow):
         attr_frame = QFrame(); attr_frame.setObjectName("attrFrame")
         attr_layout = QVBoxLayout(attr_frame)
         attr_title = QLabel("⚔ 属性 · Attributes"); attr_title.setObjectName("titleLabel"); attr_layout.addWidget(attr_title)
-
         self.radar = AttributeRadarWidget()
         attr_layout.addWidget(self.radar, 0, Qt.AlignmentFlag.AlignCenter)
-
         self.attr_grid = QGridLayout()
         self.attr1_label = QLabel(f"{self.config['attr1']}: 5.0")
         self.attr2_label = QLabel(f"{self.config['attr2']}: 5.0")
         self.attr3_label = QLabel(f"{self.config['attr3']}: 5.0")
         self.attr4_label = QLabel(f"{self.config['attr4']}: 5.0")
-        self.attr_grid.addWidget(self.attr1_label, 0, 0)
-        self.attr_grid.addWidget(self.attr2_label, 0, 1)
-        self.attr_grid.addWidget(self.attr3_label, 1, 0)
-        self.attr_grid.addWidget(self.attr4_label, 1, 1)
+        self.attr_grid.addWidget(self.attr1_label, 0, 0); self.attr_grid.addWidget(self.attr2_label, 0, 1)
+        self.attr_grid.addWidget(self.attr3_label, 1, 0); self.attr_grid.addWidget(self.attr4_label, 1, 1)
         attr_layout.addLayout(self.attr_grid)
         splitter.addWidget(attr_frame)
 
         splitter.setSizes([550, 450])
         layout.addWidget(splitter, 1)
-
         self._quest_checkboxes = {}
         self._refresh_ui()
 
     def _open_settings(self):
         dialog = TargetSettingsDialog(self.config, self)
+        rival = self.db.get_rival()
+        if rival: dialog.set_current_tier(rival.tier)
+
         if dialog.exec() == QDialog.DialogCode.Accepted:
             new_data = dialog.get_data()
+            new_tier = new_data.pop("rival_tier", RivalTier.NORMAL.value)
+            if rival:
+                rival.tier = new_tier
+                self.db.update_rival(rival)
             self.config.update(new_data)
             save_config(self.config)
-            self._refresh_target_ui()
-            self._refresh_stats()
+            self._refresh_ui()
 
     def _refresh_target_ui(self):
         self.target_title_label.setText(f"🏁 {self.config['target_name']}")
@@ -674,9 +643,17 @@ class MainWindow(QMainWindow):
         self.level_label.setText(f"你 Lv.{p.level}")
         self.xp_bar.setMaximum(p.next_level_xp); self.xp_bar.setValue(p.xp)
         self.gold_label.setText(f"🪙 {p.gold}")
-        self.rival_lvl_label.setText(f"敌 Lv.{r.level}")
-        self.rival_bar.setMaximum(r.next_level_xp); self.rival_bar.setValue(r.xp)
         
+        # 刷新今日时长
+        total_mins = self.db.get_today_study_time()
+        hours = total_mins // 60; mins = total_mins % 60
+        self.focus_label.setText(f"⏳ 今日专注: {hours}h {mins}m" if hours > 0 else f"⏳ 今日专注: {mins}m")
+        if total_mins >= 300: self.focus_label.setStyleSheet("color: #ff7b72; font-weight: bold;") 
+        elif total_mins >= 120: self.focus_label.setStyleSheet("color: #7ee787; font-weight: bold;")
+        else: self.focus_label.setStyleSheet("color: #79c0ff; font-weight: bold;")
+
+        self.rival_lvl_label.setText(f"敌({r.tier}) Lv.{r.level}")
+        self.rival_bar.setMaximum(r.next_level_xp); self.rival_bar.setValue(r.xp)
         self.radar.set_attributes(p, r, self.config)
         self.attr1_label.setText(f"{self.config['attr1']}: {p.perception:.1f}")
         self.attr2_label.setText(f"{self.config['attr2']}: {p.insight:.1f}")
@@ -696,8 +673,7 @@ class MainWindow(QMainWindow):
             cb.setProperty("quest", q)
             cb.stateChanged.connect(self._on_quest_toggled)
             row_layout.addWidget(cb, 1)
-            abandon_btn = QPushButton("放弃")
-            abandon_btn.setObjectName("abandonBtn")
+            abandon_btn = QPushButton("放弃"); abandon_btn.setObjectName("abandonBtn")
             abandon_btn.setProperty("quest", q)
             abandon_btn.clicked.connect(self._on_abandon_quest)
             row_layout.addWidget(abandon_btn)
@@ -718,27 +694,32 @@ class MainWindow(QMainWindow):
     def _on_quest_toggled(self, state: int) -> None:
         if state != Qt.CheckState.Checked.value: return
         sender = self.sender(); q = sender.property("quest")
+        
+        # 弹窗询问时长
+        dlg = CompleteQuestDialog(q.name, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            sender.blockSignals(True)
+            sender.setCheckState(Qt.CheckState.Unchecked)
+            sender.blockSignals(False)
+            return
+        duration = dlg.get_duration()
+
         pos = self.get_center_pos() 
         player_before = self.db.get_player()
-        
-        p_after, gained_xp, gained_gold = self.db.complete_quest(q.id)
+        p_after, gained_xp, gained_gold = self.db.complete_quest(q.id, duration_mins=duration)
         if not p_after:
             sender.setCheckState(Qt.CheckState.Unchecked)
             return
             
-        # 播放自定义音效，暴击使用 'crit'，普通使用 'success'
         if q.difficulty >= 4 or q.quest_type == QuestType.MAIN:
             self.sfx.play("crit")
             self.shake_window()
             FloatingText("💥 暴击成长！", pos + QPoint(0, 30), self, "#f0d84a", font_size=28)
         else:
             self.sfx.play("success")
-            
         FloatingText(f"✨ +{gained_xp} XP | 🪙 +{gained_gold}", pos, self, "lime", font_size=24)
-            
         self._play_xp_animation(player_before, p_after)
-        self._refresh_stats()
-        self._refresh_quest_list()
+        self._refresh_ui()
 
     def _play_xp_animation(self, before: Player, after: Player) -> None:
         if self._anim_group and self._anim_group.state() == QPropertyAnimation.State.Running:
@@ -769,19 +750,15 @@ class MainWindow(QMainWindow):
     def _on_abandon_quest(self) -> None:
         q = self.sender().property("quest")
         pos = self.get_center_pos()
-        
         penalty_gold = q.difficulty * 5
         rival_gain = q.difficulty * 10
-        
         reply = QMessageBox.warning(
             self, "⚠️ 严重警告",
             f"确认放弃任务【{q.name}】？\n\n💸 违约惩罚: 扣除 {penalty_gold} 金币\n😈 致命打击: 你的影子对手将趁机白嫖 {rival_gain} 点经验！",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No
         )
         if reply == QMessageBox.StandardButton.Yes:
             self.db.abandon_quest(q.id)
-            # 播放自定义放弃音效
             self.sfx.play("fail")
             FloatingText(f"💔 -{penalty_gold} 金币 | 😈 对手 +{rival_gain} XP", pos, self, "#f85149", font_size=24)
             self._refresh_ui()

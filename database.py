@@ -1,27 +1,19 @@
-"""
-LifeQuest - SQLite 数据库层
-负责建表、玩家/假想敌与任务的 CRUD，离线成长计算，以及任务奖惩逻辑。
-"""
 import sqlite3
+import random
 from pathlib import Path
 from typing import List, Optional, Tuple
 from datetime import datetime
 
-from models import Player, Rival, Quest, QuestType, QuestAttribute, QuestStatus
+from models import Player, Rival, Quest, QuestStatus, QuestType, QuestAttribute, Reward, RivalTier
 
-
-# 升级所需经验公式：基础值 * (等级 ^ 指数)，可调
 def calc_next_level_xp(level: int, base: int = 100, exponent: float = 1.2) -> int:
-    """计算升至下一级所需经验"""
     return max(base, int(base * (level ** exponent)))
 
-
 class DatabaseManager:
-    """SQLite 数据库管理：建表、玩家、假想敌、任务、完成/放弃任务逻辑"""
-
     def __init__(self, db_path: str = "lifequest.db"):
         self.db_path = Path(db_path)
         self._ensure_connection()
+        self._migrate_schema() # 关键：自动更新数据库结构
 
     def _ensure_connection(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -31,10 +23,37 @@ class DatabaseManager:
         conn.row_factory = sqlite3.Row
         return conn
 
-    def create_tables(self) -> None:
-        """创建玩家表、假想敌表与任务表"""
+    def _migrate_schema(self):
+        """数据库热更新：如果用户是旧版本，自动增加新列"""
         with self.get_connection() as conn:
-            conn.executescript("""
+            # 1. 检查 quest 表是否有 duration 字段
+            try:
+                # 尝试查询该字段，如果报错说明不存在
+                conn.execute("SELECT duration FROM quest LIMIT 1")
+            except sqlite3.OperationalError:
+                print("检测到旧版数据库，正在升级 quest 表...")
+                conn.execute("ALTER TABLE quest ADD COLUMN duration INTEGER DEFAULT 0")
+            
+            # 2. 检查 rival 表是否有 tier 字段
+            try:
+                conn.execute("SELECT tier FROM rival LIMIT 1")
+            except sqlite3.OperationalError:
+                print("检测到旧版数据库，正在升级 rival 表...")
+                conn.execute(f"ALTER TABLE rival ADD COLUMN tier TEXT DEFAULT '{RivalTier.NORMAL.value}'")
+
+            # 3. 创建奖励表 (商店)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS reward (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    cost INTEGER NOT NULL,
+                    description TEXT
+                )
+            """)
+
+    def create_tables(self) -> None:
+        with self.get_connection() as conn:
+            conn.executescript(f"""
                 CREATE TABLE IF NOT EXISTS player (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
                     level INTEGER NOT NULL DEFAULT 1,
@@ -56,7 +75,8 @@ class DatabaseManager:
                     insight REAL NOT NULL DEFAULT 5.0,
                     logic REAL NOT NULL DEFAULT 5.0,
                     charisma REAL NOT NULL DEFAULT 5.0,
-                    last_login_date TEXT NOT NULL
+                    last_login_date TEXT NOT NULL,
+                    tier TEXT DEFAULT '{RivalTier.NORMAL.value}'
                 );
 
                 CREATE TABLE IF NOT EXISTS quest (
@@ -67,176 +87,170 @@ class DatabaseManager:
                     attribute TEXT NOT NULL,
                     difficulty INTEGER NOT NULL CHECK (difficulty >= 1 AND difficulty <= 5),
                     status TEXT NOT NULL DEFAULT '未完成',
-                    completed_at TEXT
+                    completed_at TEXT,
+                    duration INTEGER DEFAULT 0
                 );
-
-                CREATE INDEX IF NOT EXISTS idx_quest_status ON quest(status);
-                CREATE INDEX IF NOT EXISTS idx_quest_type ON quest(quest_type);
             """)
 
     def init_player_if_missing(self) -> None:
-        """初始化玩家和假想敌，并计算假想敌的离线自动成长"""
         with self.get_connection() as conn:
-            # 1. 初始化玩家
-            cur = conn.execute("SELECT 1 FROM player WHERE id = 1")
-            if cur.fetchone() is None:
+            if conn.execute("SELECT 1 FROM player WHERE id = 1").fetchone() is None:
                 conn.execute(
-                    """INSERT INTO player (id, level, xp, next_level_xp, gold,
-                       perception, insight, logic, charisma)
-                       VALUES (1, 1, 0, ?, 0, 5.0, 5.0, 5.0, 5.0)""",
-                    (calc_next_level_xp(1),),
+                    """INSERT INTO player (id, level, xp, next_level_xp, gold, perception, insight, logic, charisma)
+                       VALUES (1, 1, 0, ?, 0, 5.0, 5.0, 5.0, 5.0)""", (calc_next_level_xp(1),)
                 )
             
-            # 2. 初始化假想敌 & 计算离线成长
-            now_str = datetime.now().isoformat()
-            cur_rival = conn.execute("SELECT last_login_date FROM rival WHERE id = 1")
-            row = cur_rival.fetchone()
+            # 初始化假想敌 & 计算随机离线成长
+            now = datetime.now()
+            now_str = now.isoformat()
+            row = conn.execute("SELECT * FROM rival WHERE id = 1").fetchone()
             
             if row is None:
-                # 首次创建假想敌 (稍微给点压力，初始属性5.5)
                 conn.execute(
-                    """INSERT INTO rival (id, level, xp, next_level_xp,
-                       perception, insight, logic, charisma, last_login_date)
-                       VALUES (1, 1, 0, ?, 5.5, 5.5, 5.5, 5.5, ?)""",
-                    (calc_next_level_xp(1), now_str),
+                    """INSERT INTO rival (id, level, xp, next_level_xp, perception, insight, logic, charisma, last_login_date, tier)
+                       VALUES (1, 1, 0, ?, 5.5, 5.5, 5.5, 5.5, ?, ?)""",
+                    (calc_next_level_xp(1), now_str, RivalTier.NORMAL.value),
                 )
             else:
-                # 存在假想敌，计算离线天数
-                last_date_str = row[0]
-                if last_date_str:
-                    last_date = datetime.fromisoformat(last_date_str)
-                    days_diff = (datetime.now() - last_date).total_seconds() / 86400.0
+                last_date = datetime.fromisoformat(row["last_login_date"])
+                tier_val = row["tier"]
+                
+                multiplier = 1.0
+                if "0.5x" in tier_val: multiplier = 0.5
+                elif "1.5x" in tier_val: multiplier = 1.5
+                elif "2.0x" in tier_val: multiplier = 2.0
+                
+                days_diff = (now.date() - last_date.date()).days
+                
+                if days_diff > 0:
+                    rival = Rival.from_db_row(tuple(row))
+                    total_xp_gain = 0
+                    total_attr_gain = 0.0
                     
-                    if days_diff > 0.01:  # 超过约15分钟才计算成长
-                        rival = self.get_rival()
-                        if rival:
-                            # 卷王每天固定得 150 经验，各项属性涨 0.8
-                            rival.xp += int(150 * days_diff)
-                            rival.perception += 0.8 * days_diff
-                            rival.insight += 0.8 * days_diff
-                            rival.logic += 0.8 * days_diff
-                            rival.charisma += 0.8 * days_diff
-                            
-                            # 卷王升级逻辑
-                            while rival.xp >= rival.next_level_xp:
-                                rival.xp -= rival.next_level_xp
-                                rival.level += 1
-                                rival.next_level_xp = calc_next_level_xp(rival.level)
-                            
-                            rival.last_login_date = now_str
-                            self.update_rival(rival)
+                    for _ in range(days_diff):
+                        events = random.randint(2, 4)
+                        for _ in range(events):
+                            base_xp = random.randint(30, 50)
+                            xp_gain = int(base_xp * multiplier)
+                            total_xp_gain += xp_gain
+                            total_attr_gain += (0.1 * multiplier)
+
+                    rival.xp += total_xp_gain
+                    rival.perception += total_attr_gain
+                    rival.insight += total_attr_gain
+                    rival.logic += total_attr_gain
+                    rival.charisma += total_attr_gain
+                    
+                    while rival.xp >= rival.next_level_xp:
+                        rival.xp -= rival.next_level_xp
+                        rival.level += 1
+                        rival.next_level_xp = calc_next_level_xp(rival.level)
+                    
+                    rival.last_login_date = now_str
+                    self.update_rival(rival)
+                else:
+                    conn.execute("UPDATE rival SET last_login_date = ? WHERE id = 1", (now_str,))
 
     def get_player(self) -> Optional[Player]:
         with self.get_connection() as conn:
             row = conn.execute("SELECT * FROM player WHERE id = 1").fetchone()
-            if row is None: return None
-            return Player.from_db_row(tuple(row))
+            return Player.from_db_row(tuple(row)) if row else None
 
-    def update_player(self, player: Player) -> None:
+    def update_player(self, p: Player) -> None:
         with self.get_connection() as conn:
             conn.execute(
                 """UPDATE player SET level=?, xp=?, next_level_xp=?, gold=?,
-                   perception=?, insight=?, logic=?, charisma=?
-                   WHERE id = 1""",
-                (player.level, player.xp, player.next_level_xp, player.gold,
-                 player.perception, player.insight, player.logic, player.charisma),
+                   perception=?, insight=?, logic=?, charisma=? WHERE id = 1""",
+                (p.level, p.xp, p.next_level_xp, p.gold, p.perception, p.insight, p.logic, p.charisma)
             )
 
     def get_rival(self) -> Optional[Rival]:
-        """获取影子对手数据"""
         with self.get_connection() as conn:
             row = conn.execute("SELECT * FROM rival WHERE id = 1").fetchone()
-            if row is None: return None
-            return Rival.from_db_row(tuple(row))
+            return Rival.from_db_row(tuple(row)) if row else None
 
-    def update_rival(self, rival: Rival) -> None:
+    def update_rival(self, r: Rival) -> None:
         with self.get_connection() as conn:
             conn.execute(
                 """UPDATE rival SET level=?, xp=?, next_level_xp=?,
-                   perception=?, insight=?, logic=?, charisma=?, last_login_date=?
+                   perception=?, insight=?, logic=?, charisma=?, last_login_date=?, tier=?
                    WHERE id = 1""",
-                (rival.level, rival.xp, rival.next_level_xp,
-                 rival.perception, rival.insight, rival.logic, rival.charisma, rival.last_login_date),
+                (r.level, r.xp, r.next_level_xp, r.perception, r.insight, r.logic, r.charisma, r.last_login_date, r.tier)
             )
 
-    def insert_quest(self, quest: Quest) -> int:
+    def insert_quest(self, q: Quest) -> int:
         with self.get_connection() as conn:
             cur = conn.execute(
-                """INSERT INTO quest (name, description, quest_type, attribute, difficulty, status, completed_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                quest.to_db_row(),
-            )
+                """INSERT INTO quest (name, description, quest_type, attribute, difficulty, status, completed_at, duration)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""", q.to_db_row())
             return cur.lastrowid
 
-    def get_quest(self, quest_id: int) -> Optional[Quest]:
+    def get_quest(self, qid: int) -> Optional[Quest]:
         with self.get_connection() as conn:
-            row = conn.execute("SELECT * FROM quest WHERE id = ?", (quest_id,)).fetchone()
-            if row is None: return None
-            return Quest.from_db_row(tuple(row))
+            row = conn.execute("SELECT * FROM quest WHERE id = ?", (qid,)).fetchone()
+            return Quest.from_db_row(tuple(row)) if row else None
 
-    def list_quests(
-        self,
-        status: Optional[QuestStatus] = None,
-        quest_type: Optional[QuestType] = None,
-    ) -> List[Quest]:
+    def list_quests(self, status: Optional[QuestStatus] = None) -> List[Quest]:
         with self.get_connection() as conn:
             sql = "SELECT * FROM quest WHERE 1=1"
-            params: list = []
-            if status is not None:
+            params = []
+            if status:
                 sql += " AND status = ?"
                 params.append(status.value)
-            if quest_type is not None:
-                sql += " AND quest_type = ?"
-                params.append(quest_type.value)
-            sql += " ORDER BY id"
             rows = conn.execute(sql, params).fetchall()
             return [Quest.from_db_row(tuple(r)) for r in rows]
 
-    def set_quest_status(self, quest_id: int, status: QuestStatus) -> None:
+    # --- 商店系统逻辑 ---
+    def add_reward(self, name: str, cost: int, desc: str = ""):
         with self.get_connection() as conn:
-            conn.execute("UPDATE quest SET status = ? WHERE id = ?", (status.value, quest_id))
+            conn.execute("INSERT INTO reward (name, cost, description) VALUES (?, ?, ?)", (name, cost, desc))
 
-    def delete_quest(self, quest_id: int) -> bool:
-        """硬删除任务（保留给UI，但不推荐作为常态）"""
+    def list_rewards(self) -> List[Reward]:
         with self.get_connection() as conn:
-            cur = conn.execute("DELETE FROM quest WHERE id = ?", (quest_id,))
-            return cur.rowcount > 0
+            # 检查 reward 表是否存在（防止异常）
+            try:
+                rows = conn.execute("SELECT * FROM reward").fetchall()
+                return [Reward(r["id"], r["name"], r["cost"], r["description"]) for r in rows]
+            except:
+                return []
 
-    def _xp_reward_for_quest(self, difficulty: int) -> int:
-        return 20 + difficulty * 15
+    def delete_reward(self, rid: int):
+        with self.get_connection() as conn:
+            conn.execute("DELETE FROM reward WHERE id = ?", (rid,))
 
-    def _gold_reward_for_quest(self, difficulty: int) -> int:
-        return 10 + difficulty * 5
+    def buy_reward(self, reward_id: int) -> Tuple[bool, str]:
+        with self.get_connection() as conn:
+            p = self.get_player()
+            r_row = conn.execute("SELECT * FROM reward WHERE id = ?", (reward_id,)).fetchone()
+            if not r_row: return False, "商品不存在"
+            
+            cost = r_row["cost"]
+            if p.gold < cost:
+                return False, f"金币不足！需要 {cost}，你只有 {p.gold}"
+            
+            p.gold -= cost
+            self.update_player(p)
+            return True, f"购买成功：{r_row['name']}"
 
-    def _attribute_gain_for_quest(self, difficulty: int) -> int:
-        return 1 if difficulty >= 3 else 0
-
-    def complete_quest(self, quest_id: int) -> Tuple[Optional[Player], int, int]:
-        """
-        完成任务的核心逻辑。
-        返回: (更新后的Player, 获得的XP, 获得的Gold)。若失败返回 (None, 0, 0)
-        """
+    def complete_quest(self, quest_id: int, duration_mins: int = 0) -> Tuple[Optional[Player], int, int]:
         quest = self.get_quest(quest_id)
-        if quest is None or quest.status == QuestStatus.COMPLETE:
+        if not quest or quest.status == QuestStatus.COMPLETE:
             return None, 0, 0
 
         player = self.get_player()
-        if player is None: return None, 0, 0
-
-        xp_gain = self._xp_reward_for_quest(quest.difficulty)
-        gold_gain = self._gold_reward_for_quest(quest.difficulty)
-        attr_gain = self._attribute_gain_for_quest(quest.difficulty)
+        
+        xp_gain = 20 + quest.difficulty * 15
+        gold_gain = 10 + quest.difficulty * 5
+        attr_gain = 1 if quest.difficulty >= 3 else 0
 
         player.xp += xp_gain
         player.gold += gold_gain
-
-        # 雅思四维成长
+        
         if quest.attribute == QuestAttribute.PERCEPTION: player.perception += attr_gain
         elif quest.attribute == QuestAttribute.INSIGHT: player.insight += attr_gain
         elif quest.attribute == QuestAttribute.LOGIC: player.logic += attr_gain
         elif quest.attribute == QuestAttribute.CHARISMA: player.charisma += attr_gain
 
-        # 连升逻辑
         while player.xp >= player.next_level_xp:
             player.xp -= player.next_level_xp
             player.level += 1
@@ -244,46 +258,48 @@ class DatabaseManager:
 
         self.update_player(player)
         
-        # 记录完成时间与状态
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
         with self.get_connection() as conn:
-            conn.execute("UPDATE quest SET status = ?, completed_at = ? WHERE id = ?", 
-                         (QuestStatus.COMPLETE.value, now_str, quest_id))
+            conn.execute(
+                "UPDATE quest SET status = ?, completed_at = ?, duration = ? WHERE id = ?", 
+                (QuestStatus.COMPLETE.value, now_str, duration_mins, quest_id)
+            )
             
         return player, xp_gain, gold_gain
 
     def abandon_quest(self, quest_id: int) -> Tuple[int, int]:
-        """
-        放弃任务惩罚机制！
-        返回: (扣除的金币, 对手白嫖的经验)。若失败返回 (0, 0)
-        """
         quest = self.get_quest(quest_id)
-        if quest is None or quest.status != QuestStatus.INCOMPLETE:
-            return 0, 0
-            
+        if not quest: return 0, 0
         penalty_gold = quest.difficulty * 5
-        rival_gain_xp = quest.difficulty * 10
+        rival_gain = quest.difficulty * 10
         
-        # 1. 扣除玩家金币 (不扣成负数)
-        player = self.get_player()
-        if player:
-            player.gold = max(0, player.gold - penalty_gold)
-            self.update_player(player)
-            
-        # 2. 对手狂喜 (加经验升级)
-        rival = self.get_rival()
-        if rival:
-            rival.xp += rival_gain_xp
-            while rival.xp >= rival.next_level_xp:
-                rival.xp -= rival.next_level_xp
-                rival.level += 1
-                rival.next_level_xp = calc_next_level_xp(rival.level)
-            self.update_rival(rival)
-            
-        # 3. 标记为已放弃，并记录时间
+        p = self.get_player()
+        p.gold = max(0, p.gold - penalty_gold)
+        self.update_player(p)
+        
+        r = self.get_rival()
+        r.xp += rival_gain
+        while r.xp >= r.next_level_xp:
+            r.xp -= r.next_level_xp
+            r.level += 1
+            r.next_level_xp = calc_next_level_xp(r.level)
+        self.update_rival(r)
+        
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
         with self.get_connection() as conn:
             conn.execute("UPDATE quest SET status = ?, completed_at = ? WHERE id = ?", 
                          (QuestStatus.ABANDONED.value, now_str, quest_id))
-                         
-        return penalty_gold, rival_gain_xp
+        return penalty_gold, rival_gain
+
+    def get_today_study_time(self) -> int:
+        today_prefix = datetime.now().strftime("%Y-%m-%d")
+        with self.get_connection() as conn:
+            # 安全检查 duration 列
+            try:
+                row = conn.execute(
+                    "SELECT SUM(duration) as total FROM quest WHERE completed_at LIKE ? AND status = ?", 
+                    (f"{today_prefix}%", QuestStatus.COMPLETE.value)
+                ).fetchone()
+                return row["total"] if row["total"] else 0
+            except:
+                return 0
