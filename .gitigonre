@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 *.db
 *.sqlite3
+*.json
+进度备忘录.txt

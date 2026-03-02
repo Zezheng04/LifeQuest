@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
     QLabel, QProgressBar, QFrame, QScrollArea, QCheckBox, QSplitter, 
     QGridLayout, QPushButton, QDialog, QDialogButtonBox, QFormLayout, 
     QLineEdit, QComboBox, QSpinBox, QMessageBox, QTableWidget, QTableWidgetItem,
-    QGraphicsOpacityEffect, QDateEdit, QGroupBox
+    QGraphicsOpacityEffect, QDateEdit, QGroupBox,QTreeWidget,QHeaderView
 )
 from PyQt6.QtGui import QPainter, QPen, QBrush, QColor, QFont, QPainterPath
 
@@ -27,6 +27,9 @@ from PyQt6.QtMultimedia import QSoundEffect
 
 from database import DatabaseManager
 from models import Player, Rival, Quest, QuestStatus, QuestType, QuestAttribute
+
+
+from collections import defaultdict
 
 # ---------- 本地配置系统 ----------
 CONFIG_FILE = "config.json"
@@ -320,36 +323,179 @@ class TargetSettingsDialog(QDialog):
         }
 
 # ---------- 历史卷宗对话框 ----------
+from PyQt6.QtWidgets import QFileDialog, QTreeWidgetItem  # 确保头部引入了这两个组件
+
 class QuestHistoryDialog(QDialog):
     def __init__(self, db: DatabaseManager, config: dict, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("📜 历史卷宗")
-        self.resize(550, 350)
-        self.setStyleSheet(get_stylesheet())
-        layout = QVBoxLayout(self)
-        table = QTableWidget()
-        quests = db.list_quests(status=QuestStatus.COMPLETE)
-        table.setColumnCount(4)
-        table.setHorizontalHeaderLabels(["完成时间", "任务名", "类型", "提升属性"])
-        table.setRowCount(len(quests))
+        self.db = db
+        self.config = config
+        self.setWindowTitle("📜 历史卷宗 (Chronicles)")
+        self.resize(800, 600)
         
-        # 属性名称映射
-        attr_map = {
-            QuestAttribute.PERCEPTION.value: config["attr1"],
-            QuestAttribute.INSIGHT.value: config["attr2"],
-            QuestAttribute.LOGIC.value: config["attr3"],
-            QuestAttribute.CHARISMA.value: config["attr4"],
-        }
-        
-        for i, q in enumerate(reversed(quests)):
-            table.setItem(i, 0, QTableWidgetItem(q.completed_at or "未知"))
-            table.setItem(i, 1, QTableWidgetItem(q.name))
-            table.setItem(i, 2, QTableWidgetItem(q.quest_type.value))
-            table.setItem(i, 3, QTableWidgetItem(attr_map.get(q.attribute.value, q.attribute.value)))
-        table.resizeColumnsToContents()
-        table.horizontalHeader().setStretchLastSection(True)
-        layout.addWidget(table)
+        # 使用 QSS 增强树状列表的样式，使其符合 Cyberpunk 风格
+        self.setStyleSheet(get_stylesheet() + """
+            QTreeWidget {
+                background-color: #0d1117;
+                border: 1px solid #30363d;
+                font-size: 14px;
+                outline: none;
+            }
+            QTreeWidget::item { 
+                padding: 8px; 
+                border-bottom: 1px solid #21262d;
+            }
+            QTreeWidget::item:selected {
+                background-color: #1f6feb; /* 选中高亮蓝 */
+                color: white;
+            }
+            QTreeWidget::branch:has-children:!has-siblings:closed,
+            QTreeWidget::branch:closed:has-children:has-siblings {
+                border-image: none;
+                image: none; /* 可以根据需要加箭头图标 */
+            }
+            QLabel { color: #8b949e; }
+        """)
 
+        layout = QVBoxLayout(self)
+
+        # --- 顶部工具栏 ---
+        top_layout = QHBoxLayout()
+        info_label = QLabel("查看你的征程与战绩 (按日期归档)")
+        info_label.setStyleSheet("font-style: italic; font-weight: bold;")
+        
+        # 💾 导出备份按钮：解决数据安全焦虑
+        export_btn = QPushButton("💾 导出备份 (JSON)")
+        export_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        export_btn.setStyleSheet("""
+            QPushButton { 
+                color: #7ee787; 
+                border: 1px solid #238636; 
+                background-color: #161b22;
+            }
+            QPushButton:hover { background-color: #238636; color: white; }
+        """)
+        export_btn.clicked.connect(self._export_history)
+        
+        top_layout.addWidget(info_label)
+        top_layout.addStretch()
+        top_layout.addWidget(export_btn)
+        layout.addLayout(top_layout)
+
+        # --- 核心数据展示区域 (树状列表) ---
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["时间 / 任务名称", "类型", "属性加成", "战利品"])
+        self.tree.setColumnWidth(0, 350) # 让第一列宽一点
+        self.tree.setAlternatingRowColors(True)
+        # 隐藏根节点的折叠图标所在列的缩进，使外观更整洁
+        self.tree.setRootIsDecorated(True) 
+        layout.addWidget(self.tree)
+
+        # --- 底部按钮 ---
+        btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        btn_box.rejected.connect(self.reject)
+        layout.addWidget(btn_box)
+
+        # 加载数据
+        self._load_history()
+
+    def _get_attr_name(self, attr_enum_val):
+        """将内部属性枚举值映射为用户自定义的名称"""
+        mapping = {
+            QuestAttribute.PERCEPTION.value: self.config["attr1"],
+            QuestAttribute.INSIGHT.value: self.config["attr2"],
+            QuestAttribute.LOGIC.value: self.config["attr3"],
+            QuestAttribute.CHARISMA.value: self.config["attr4"],
+        }
+        return mapping.get(attr_enum_val, attr_enum_val)
+
+    def _load_history(self):
+        """核心逻辑：从数据库读取已完成任务，并按日期分组显示"""
+        self.tree.clear()
+        
+        # 1. 获取所有已完成任务
+        quests = self.db.list_quests(status=QuestStatus.COMPLETE)
+        # 按完成时间倒序排列（最近的在上面）
+        quests.sort(key=lambda x: x.completed_at or "", reverse=True)
+        
+        # 2. 按日期分组数据
+        grouped_data = defaultdict(list)
+        for q in quests:
+            if q.completed_at:
+                date_str = q.completed_at.split(" ")[0] # 提取 "2023-10-27"
+                time_str = q.completed_at.split(" ")[1] # 提取 "14:30"
+            else:
+                date_str = "未知日期"
+                time_str = "--:--"
+            grouped_data[date_str].append((time_str, q))
+
+        # 3. 构建树状节点
+        for date_key, items in grouped_data.items():
+            # --- 创建日期父节点 ---
+            date_node = QTreeWidgetItem(self.tree)
+            date_node.setText(0, f"📅 {date_key} (完成 {len(items)} 个任务)")
+            # 设置父节点样式：加粗，略微灰色背景
+            font = date_node.font(0)
+            font.setBold(True)
+            date_node.setFont(0, font)
+            date_node.setForeground(0, QBrush(QColor("#8b949e"))) 
+            
+            # --- 创建任务子节点 ---
+            for time_str, q in items:
+                item = QTreeWidgetItem(date_node)
+                
+                # 第一列：时间 + 名称
+                item.setText(0, f"[{time_str}] {q.name}")
+                item.setForeground(0, QBrush(QColor("#c9d1d9")))
+                
+                # 第二列：类型
+                item.setText(1, q.quest_type.value)
+                if q.quest_type == QuestType.MAIN:
+                    item.setForeground(1, QBrush(QColor("#f0883e"))) # 主线任务橙色高亮
+                
+                # 第三列：属性
+                attr_name = self._get_attr_name(q.attribute.value)
+                item.setText(2, attr_name)
+                item.setForeground(2, QBrush(QColor("#79c0ff")))
+                
+                # 第四列：战利品 (计算 XP 和 金币)
+                # 注意：这里我们简单反推显示的数值，实际数值在数据库完成时已结算
+                xp = 20 + q.difficulty * 15
+                gold = 10 + q.difficulty * 5
+                item.setText(3, f"✨+{xp} / 🪙+{gold}")
+                item.setForeground(3, QBrush(QColor("#7ee787"))) # 绿色代表收益
+
+            # 默认展开所有日期
+            date_node.setExpanded(True)
+
+    def _export_history(self):
+        """将历史记录导出为 JSON 文件，实现数据独立备份"""
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "导出备份", f"lifequest_backup_{datetime.now().strftime('%Y%m%d')}.json", "JSON Files (*.json)"
+        )
+        
+        if file_path:
+            try:
+                quests = self.db.list_quests(status=QuestStatus.COMPLETE)
+                export_data = []
+                for q in quests:
+                    # 将对象转为字典
+                    q_dict = {
+                        "name": q.name,
+                        "desc": q.description,
+                        "type": q.quest_type.value,
+                        "attr": q.attribute.value,
+                        "diff": q.difficulty,
+                        "completed_at": q.completed_at
+                    }
+                    export_data.append(q_dict)
+                
+                with open(file_path, "w", encoding="utf-8") as f:
+                    json.dump(export_data, f, ensure_ascii=False, indent=4)
+                
+                QMessageBox.information(self, "成功", f"历史记录已成功备份至：\n{file_path}\n\n即使删除数据库文件，此备份依然安全。")
+            except Exception as e:
+                QMessageBox.critical(self, "错误", f"导出失败: {str(e)}")
 # ---------- 添加任务对话框 ----------
 class AddQuestDialog(QDialog):
     def __init__(self, config, parent=None):
