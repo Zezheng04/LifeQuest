@@ -13,7 +13,6 @@ class DatabaseManager:
     def __init__(self, db_path: str = "lifequest.db"):
         self.db_path = Path(db_path)
         self._ensure_connection()
-        self._migrate_schema() # 关键：自动更新数据库结构
 
     def _ensure_connection(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -24,24 +23,19 @@ class DatabaseManager:
         return conn
 
     def _migrate_schema(self):
-        """数据库热更新：如果用户是旧版本，自动增加新列"""
         with self.get_connection() as conn:
-            # 1. 检查 quest 表是否有 duration 字段
             try:
-                # 尝试查询该字段，如果报错说明不存在
                 conn.execute("SELECT duration FROM quest LIMIT 1")
             except sqlite3.OperationalError:
-                print("检测到旧版数据库，正在升级 quest 表...")
-                conn.execute("ALTER TABLE quest ADD COLUMN duration INTEGER DEFAULT 0")
+                try: conn.execute("ALTER TABLE quest ADD COLUMN duration INTEGER DEFAULT 0")
+                except: pass
             
-            # 2. 检查 rival 表是否有 tier 字段
             try:
                 conn.execute("SELECT tier FROM rival LIMIT 1")
             except sqlite3.OperationalError:
-                print("检测到旧版数据库，正在升级 rival 表...")
-                conn.execute(f"ALTER TABLE rival ADD COLUMN tier TEXT DEFAULT '{RivalTier.NORMAL.value}'")
+                try: conn.execute(f"ALTER TABLE rival ADD COLUMN tier TEXT DEFAULT '{RivalTier.NORMAL.value}'")
+                except: pass
 
-            # 3. 创建奖励表 (商店)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS reward (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -91,6 +85,7 @@ class DatabaseManager:
                     duration INTEGER DEFAULT 0
                 );
             """)
+        self._migrate_schema()
 
     def init_player_if_missing(self) -> None:
         with self.get_connection() as conn:
@@ -100,7 +95,6 @@ class DatabaseManager:
                        VALUES (1, 1, 0, ?, 0, 5.0, 5.0, 5.0, 5.0)""", (calc_next_level_xp(1),)
                 )
             
-            # 初始化假想敌 & 计算随机离线成长
             now = datetime.now()
             now_str = now.isoformat()
             row = conn.execute("SELECT * FROM rival WHERE id = 1").fetchone()
@@ -114,19 +108,16 @@ class DatabaseManager:
             else:
                 last_date = datetime.fromisoformat(row["last_login_date"])
                 tier_val = row["tier"]
-                
                 multiplier = 1.0
                 if "0.5x" in tier_val: multiplier = 0.5
                 elif "1.5x" in tier_val: multiplier = 1.5
                 elif "2.0x" in tier_val: multiplier = 2.0
                 
                 days_diff = (now.date() - last_date.date()).days
-                
                 if days_diff > 0:
                     rival = Rival.from_db_row(tuple(row))
                     total_xp_gain = 0
                     total_attr_gain = 0.0
-                    
                     for _ in range(days_diff):
                         events = random.randint(2, 4)
                         for _ in range(events):
@@ -185,6 +176,15 @@ class DatabaseManager:
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""", q.to_db_row())
             return cur.lastrowid
 
+    # --- 新增：更新任务信息 ---
+    def update_quest(self, q: Quest) -> None:
+        with self.get_connection() as conn:
+            conn.execute(
+                """UPDATE quest SET name=?, description=?, quest_type=?, attribute=?, difficulty=?
+                   WHERE id=?""",
+                (q.name, q.description, q.quest_type.value, q.attribute.value, q.difficulty, q.id)
+            )
+
     def get_quest(self, qid: int) -> Optional[Quest]:
         with self.get_connection() as conn:
             row = conn.execute("SELECT * FROM quest WHERE id = ?", (qid,)).fetchone()
@@ -207,7 +207,6 @@ class DatabaseManager:
 
     def list_rewards(self) -> List[Reward]:
         with self.get_connection() as conn:
-            # 检查 reward 表是否存在（防止异常）
             try:
                 rows = conn.execute("SELECT * FROM reward").fetchall()
                 return [Reward(r["id"], r["name"], r["cost"], r["description"]) for r in rows]
@@ -246,10 +245,12 @@ class DatabaseManager:
         player.xp += xp_gain
         player.gold += gold_gain
         
-        if quest.attribute == QuestAttribute.PERCEPTION: player.perception += attr_gain
-        elif quest.attribute == QuestAttribute.INSIGHT: player.insight += attr_gain
-        elif quest.attribute == QuestAttribute.LOGIC: player.logic += attr_gain
-        elif quest.attribute == QuestAttribute.CHARISMA: player.charisma += attr_gain
+        # 逻辑修改：如果属性是 OTHER，则不加雷达属性
+        if quest.attribute != QuestAttribute.OTHER:
+            if quest.attribute == QuestAttribute.PERCEPTION: player.perception += attr_gain
+            elif quest.attribute == QuestAttribute.INSIGHT: player.insight += attr_gain
+            elif quest.attribute == QuestAttribute.LOGIC: player.logic += attr_gain
+            elif quest.attribute == QuestAttribute.CHARISMA: player.charisma += attr_gain
 
         while player.xp >= player.next_level_xp:
             player.xp -= player.next_level_xp
@@ -294,7 +295,6 @@ class DatabaseManager:
     def get_today_study_time(self) -> int:
         today_prefix = datetime.now().strftime("%Y-%m-%d")
         with self.get_connection() as conn:
-            # 安全检查 duration 列
             try:
                 row = conn.execute(
                     "SELECT SUM(duration) as total FROM quest WHERE completed_at LIKE ? AND status = ?", 
