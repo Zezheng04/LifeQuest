@@ -1,10 +1,11 @@
 ﻿"""
-LifeQuest - PyQt6 游戏风格主界面
+LifeQuest V3.0 - 活着的系统
 """
 import math
 import sys
 import json
 import os
+import random
 from datetime import datetime
 from typing import Optional
 from collections import defaultdict
@@ -18,13 +19,14 @@ from PyQt6.QtWidgets import (
     QLabel, QProgressBar, QFrame, QScrollArea, QCheckBox, QSplitter, 
     QGridLayout, QPushButton, QDialog, QDialogButtonBox, QFormLayout, 
     QLineEdit, QComboBox, QSpinBox, QMessageBox, QTableWidget, QTableWidgetItem,
-    QGraphicsOpacityEffect, QDateEdit, QGroupBox, QTreeWidget, QHeaderView, QTreeWidgetItem, QFileDialog
+    QGraphicsOpacityEffect, QDateEdit, QGroupBox, QTreeWidget, QHeaderView, QTreeWidgetItem, QFileDialog,
+    QRadioButton, QButtonGroup
 )
 from PyQt6.QtGui import QPainter, QPen, QBrush, QColor, QFont, QPainterPath
 from PyQt6.QtMultimedia import QSoundEffect
 
 from database import DatabaseManager
-from models import Player, Rival, Quest, QuestStatus, QuestType, QuestAttribute, RivalTier
+from models import Player, Rival, Quest, QuestStatus, QuestType, QuestAttribute, RivalTier, QuestFrequency
 
 CONFIG_FILE = "config.json"
 
@@ -223,6 +225,7 @@ def get_stylesheet() -> str:
     QLineEdit, QComboBox, QSpinBox, QDateEdit { background-color: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 4px; padding: 6px; min-height: 20px; }
     QTableWidget, QTreeWidget { background-color: #161b22; color: #c9d1d9; gridline-color: #30363d; border: 1px solid #30363d;}
     QHeaderView::section { background-color: #21262d; color: white; border: 1px solid #30363d; padding: 4px;}
+    QRadioButton { color: #c9d1d9; }
     """
 
 class TargetSettingsDialog(QDialog):
@@ -288,14 +291,13 @@ class QuestHistoryDialog(QDialog):
         self.config = config
         self.setWindowTitle("📜 历史卷宗 (Chronicles)")
         self.resize(800, 600)
-        # 优化配色：去除纯白背景，使用深色交替
         self.setStyleSheet(get_stylesheet() + """
             QTreeWidget { 
                 background-color: #0d1117; 
                 border: 1px solid #30363d; 
                 font-size: 14px; 
                 outline: none;
-                alternate-background-color: #161b22; /* 深色交替 */
+                alternate-background-color: #161b22; 
             }
             QTreeWidget::item { 
                 padding: 8px; 
@@ -320,7 +322,7 @@ class QuestHistoryDialog(QDialog):
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["时间 / 任务名称", "类型", "属性加成", "战利品"])
         self.tree.setColumnWidth(0, 350) 
-        self.tree.setAlternatingRowColors(True) # 开启交替颜色
+        self.tree.setAlternatingRowColors(True) 
         self.tree.setRootIsDecorated(True) 
         layout.addWidget(self.tree)
         self._load_history()
@@ -337,7 +339,11 @@ class QuestHistoryDialog(QDialog):
 
     def _load_history(self):
         self.tree.clear()
-        quests = self.db.list_quests(status=QuestStatus.COMPLETE)
+        # V3 优化：也显示过期任务
+        quests = self.db.list_quests(status=None) # 取所有
+        # 只要完成、放弃或过期的
+        quests = [q for q in quests if q.status != QuestStatus.INCOMPLETE]
+        
         quests.sort(key=lambda x: x.completed_at or "", reverse=True)
         grouped_data = defaultdict(list)
         for q in quests:
@@ -350,22 +356,33 @@ class QuestHistoryDialog(QDialog):
 
         for date_key, items in grouped_data.items():
             date_node = QTreeWidgetItem(self.tree)
-            date_node.setText(0, f"📅 {date_key} (完成 {len(items)} 个任务)")
+            date_node.setText(0, f"📅 {date_key}")
             font = date_node.font(0); font.setBold(True); date_node.setFont(0, font)
             date_node.setForeground(0, QBrush(QColor("#8b949e"))) 
             for time_str, q in items:
                 item = QTreeWidgetItem(date_node)
-                item.setText(0, f"[{time_str}] {q.name}")
-                item.setForeground(0, QBrush(QColor("#c9d1d9")))
+                status_mark = ""
+                color = "#c9d1d9"
+                if q.status == QuestStatus.ABANDONED: 
+                    status_mark = "(已放弃)"; color = "#f85149"
+                elif q.status == QuestStatus.EXPIRED:
+                    status_mark = "(已过期)"; color = "#8b949e"
+                
+                item.setText(0, f"[{time_str}] {q.name} {status_mark}")
+                item.setForeground(0, QBrush(QColor(color)))
                 item.setText(1, q.quest_type.value)
                 if q.quest_type == QuestType.MAIN:
                     item.setForeground(1, QBrush(QColor("#f0883e")))
                 attr_name = self._get_attr_name(q.attribute.value)
                 item.setText(2, attr_name)
                 item.setForeground(2, QBrush(QColor("#79c0ff")))
-                xp = 20 + q.difficulty * 15; gold = 10 + q.difficulty * 5
-                item.setText(3, f"✨+{xp} / 🪙+{gold}")
-                item.setForeground(3, QBrush(QColor("#7ee787")))
+                
+                if q.status == QuestStatus.COMPLETE:
+                    xp = 20 + q.difficulty * 15; gold = 10 + q.difficulty * 5
+                    item.setText(3, f"✨+{xp} / 🪙+{gold}")
+                    item.setForeground(3, QBrush(QColor("#7ee787")))
+                else:
+                    item.setText(3, "---")
             date_node.setExpanded(True)
 
     def _export_history(self):
@@ -379,7 +396,6 @@ class QuestHistoryDialog(QDialog):
             except Exception as e: QMessageBox.critical(self, "错误", str(e))
 
 class AddQuestDialog(QDialog):
-    # 修改：支持传入 quest 对象进行编辑
     def __init__(self, config, parent=None, quest_to_edit: Optional[Quest] = None):
         super().__init__(parent)
         self.config = config
@@ -387,7 +403,7 @@ class AddQuestDialog(QDialog):
         
         title = "✏️ 编辑任务" if quest_to_edit else "➕ 添加任务"
         self.setWindowTitle(title)
-        self.setMinimumWidth(360)
+        self.setMinimumWidth(400)
         self.setStyleSheet(get_stylesheet())
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -405,7 +421,6 @@ class AddQuestDialog(QDialog):
         form.addRow("类型", self.type_combo)
         
         self.attr_combo = QComboBox()
-        # 增加“其他”选项
         self.attr_combo.addItems([
             config["attr1"], config["attr2"], config["attr3"], config["attr4"], "其他 (无属性)"
         ])
@@ -416,25 +431,67 @@ class AddQuestDialog(QDialog):
         self.difficulty_spin.setValue(2)
         form.addRow("难度 (1-5)", self.difficulty_spin)
         
+        # V3 新增：频率设置
+        freq_group = QGroupBox("重复设置")
+        freq_layout = QVBoxLayout(freq_group)
+        self.rb_once = QRadioButton("一次性任务")
+        self.rb_recurring = QRadioButton("长期循环 (每天重置)")
+        self.rb_once.setChecked(True) # 默认一次性
+        bg = QButtonGroup(self)
+        bg.addButton(self.rb_once); bg.addButton(self.rb_recurring)
+        freq_layout.addWidget(self.rb_once)
+        freq_layout.addWidget(self.rb_recurring)
+        
+        # 休息日设置 (默认全选)
+        days_layout = QHBoxLayout()
+        self.day_checks = []
+        days_label = ["一", "二", "三", "四", "五", "六", "日"]
+        for i, label in enumerate(days_label):
+            cb = QCheckBox(label)
+            cb.setChecked(True) # 默认每天都做
+            self.day_checks.append(cb)
+            days_layout.addWidget(cb)
+        freq_layout.addLayout(days_layout)
+        
+        # 逻辑联动：选一次性时，禁用星期选择
+        self.rb_once.toggled.connect(lambda c: self._toggle_days(not c))
+        self._toggle_days(False)
+        
+        layout.addWidget(freq_group)
         layout.addLayout(form)
+        
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self._try_accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
         
-        # 如果是编辑模式，回填数据
         if quest_to_edit:
             self.name_edit.setText(quest_to_edit.name)
             self.desc_edit.setText(quest_to_edit.description)
             self.type_combo.setCurrentText(quest_to_edit.quest_type.value)
             self.difficulty_spin.setValue(quest_to_edit.difficulty)
             
-            # 回填属性
             if quest_to_edit.attribute == QuestAttribute.PERCEPTION: self.attr_combo.setCurrentText(config["attr1"])
             elif quest_to_edit.attribute == QuestAttribute.INSIGHT: self.attr_combo.setCurrentText(config["attr2"])
             elif quest_to_edit.attribute == QuestAttribute.LOGIC: self.attr_combo.setCurrentText(config["attr3"])
             elif quest_to_edit.attribute == QuestAttribute.CHARISMA: self.attr_combo.setCurrentText(config["attr4"])
             else: self.attr_combo.setCurrentText("其他 (无属性)")
+            
+            # 回填频率
+            if quest_to_edit.frequency == QuestFrequency.RECURRING:
+                self.rb_recurring.setChecked(True)
+                # 解析 active_days "1,3,5"
+                if quest_to_edit.active_days:
+                    active_set = set(quest_to_edit.active_days.split(","))
+                    for i, cb in enumerate(self.day_checks):
+                        # i是从0开始(周一)，iso weekday是1开始
+                        cb.setChecked(str(i+1) in active_set)
+            else:
+                self.rb_once.setChecked(True)
+
+    def _toggle_days(self, enable):
+        for cb in self.day_checks:
+            cb.setEnabled(enable)
 
     def _try_accept(self) -> None:
         if self.name_edit.text().strip(): self.accept()
@@ -449,11 +506,21 @@ class AddQuestDialog(QDialog):
         elif st == self.config["attr2"]: attr = QuestAttribute.INSIGHT
         elif st == self.config["attr3"]: attr = QuestAttribute.LOGIC
         elif st == self.config["attr4"]: attr = QuestAttribute.CHARISMA
-        else: attr = QuestAttribute.OTHER # 处理其他
+        else: attr = QuestAttribute.OTHER
             
         qt = QuestType.DAILY if self.type_combo.currentText() == QuestType.DAILY.value else QuestType.MAIN
         diff = self.difficulty_spin.value()
-        return (name, desc or name, qt, attr, diff)
+        
+        # V3 频率数据
+        freq = QuestFrequency.RECURRING if self.rb_recurring.isChecked() else QuestFrequency.ONCE
+        active_days_str = ""
+        if freq == QuestFrequency.RECURRING:
+            selected_days = []
+            for i, cb in enumerate(self.day_checks):
+                if cb.isChecked(): selected_days.append(str(i+1))
+            active_days_str = ",".join(selected_days)
+            
+        return (name, desc or name, qt, attr, diff, freq, active_days_str)
 
 class ShopDialog(QDialog):
     def __init__(self, db: DatabaseManager, parent=None):
@@ -526,7 +593,6 @@ class ShopDialog(QDialog):
         self._refresh_list()
 
     def _del_item(self):
-        # 增加删除确认，防止误触
         if QMessageBox.question(self, "确认删除", "确定要下架这个商品吗？", 
                                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
             self.db.delete_reward(self.sender().property("rid"))
@@ -570,6 +636,9 @@ class MainWindow(QMainWindow):
 
         self._animator: Optional[ProgressBarAnimator] = None
         self._anim_group: Optional[QSequentialAnimationGroup] = None
+        
+        # V3: 记录当前日期，用于跨天检测
+        self._current_date_str = datetime.now().strftime("%Y-%m-%d")
 
         self.setWindowTitle("LifeQuest — 目标竞速篇")
         self.setMinimumSize(950, 650)
@@ -650,6 +719,38 @@ class MainWindow(QMainWindow):
         self._quest_checkboxes = {}
         self._refresh_ui()
 
+        # --- V3 定时器 ---
+        # 1. 跨天检查定时器 (每分钟检查一次)
+        self.date_check_timer = QTimer(self)
+        self.date_check_timer.timeout.connect(self._check_date_change)
+        self.date_check_timer.start(60000)
+
+        # 2. 对手随机成长定时器 (每10分钟触发一次)
+        self.rival_grow_timer = QTimer(self)
+        self.rival_grow_timer.timeout.connect(self._on_rival_timer)
+        self.rival_grow_timer.start(600000) # 10分钟 = 600000毫秒
+
+    def _check_date_change(self):
+        """检测是否跨天，如果跨天则刷新任务状态"""
+        now_str = datetime.now().strftime("%Y-%m-%d")
+        if now_str != self._current_date_str:
+            print(f"检测到跨天: {self._current_date_str} -> {now_str}")
+            self._current_date_str = now_str
+            self.db.check_daily_reset() # 核心：重置循环任务
+            self._refresh_ui()
+            FloatingText("📅 新的一天开始了！", self.get_center_pos(), self, "cyan", 28)
+
+    def _on_rival_timer(self):
+        """对手挂机成长"""
+        leveled_up, xp_gained = self.db.rival_random_growth()
+        if xp_gained > 0:
+            self._refresh_stats()
+            # 可以选择是否弹窗提示，或者只是默默变强
+            # 如果升级了，给个提示
+            if leveled_up:
+                r = self.db.get_rival()
+                FloatingText(f"😈 宿敌升级了! Lv.{r.level}", self.get_center_pos() + QPoint(0, -50), self, "#f85149", 24)
+
     def _open_settings(self):
         dialog = TargetSettingsDialog(self.config, self)
         rival = self.db.get_rival()
@@ -710,13 +811,15 @@ class MainWindow(QMainWindow):
         quests = self.db.list_quests(status=QuestStatus.INCOMPLETE)
         for q in quests:
             row = QWidget(); row_layout = QHBoxLayout(row); row_layout.setContentsMargins(0, 4, 0, 4)
-            cb = QCheckBox(f"[{q.quest_type.value}] {q.name}")
+            
+            # V3: 图标显示循环
+            prefix = "[循环]" if q.frequency == QuestFrequency.RECURRING else "[一次]"
+            cb = QCheckBox(f"{prefix} {q.name}")
             cb.setToolTip(q.description)
             cb.setProperty("quest", q)
             cb.stateChanged.connect(self._on_quest_toggled)
             row_layout.addWidget(cb, 1)
             
-            # 增加：编辑按钮
             edit_btn = QPushButton("✎")
             edit_btn.setObjectName("editTaskBtn")
             edit_btn.setProperty("quest", q)
@@ -792,21 +895,20 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted: return
         data = dialog.get_quest_data()
         if not data: return
-        name, desc, qt, attr, diff = data
-        q = Quest(name=name, description=desc, quest_type=qt, attribute=attr, difficulty=diff)
+        # data: name, desc, qt, attr, diff, freq, active_days
+        name, desc, qt, attr, diff, freq, active_days = data
+        q = Quest(name=name, description=desc, quest_type=qt, attribute=attr, difficulty=diff, frequency=freq, active_days=active_days)
         self.db.insert_quest(q)
         self._refresh_quest_list()
 
-    # 新增：处理编辑任务逻辑
     def _on_edit_quest(self) -> None:
         q = self.sender().property("quest")
         dialog = AddQuestDialog(self.config, self, quest_to_edit=q)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             data = dialog.get_quest_data()
             if data:
-                # 更新对象属性
-                q.name, q.description, q.quest_type, q.attribute, q.difficulty = data
-                # 更新数据库
+                # V3: 更新所有字段
+                q.name, q.description, q.quest_type, q.attribute, q.difficulty, q.frequency, q.active_days = data
                 self.db.update_quest(q)
                 self._refresh_quest_list()
 

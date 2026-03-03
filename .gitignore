@@ -34,3 +34,11 @@ LifeQuest_Release*/
 # --- 操作系统生成垃圾文件 ---
 .DS_Store
 Thumbs.db
+
+# 忽略所有 LifeQuest_v 开头的目录
+LifeQuest_v*/
+# 忽略所有 LifeQuest_RPG 开头的目录
+LifeQuest_RPG_*/
+
+# 如果你还想忽略其他可能的打包产物，可以添加：
+LifeQuest_*.zip
