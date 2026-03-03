@@ -1,5 +1,6 @@
 ﻿"""
-LifeQuest V3.0 - 活着的系统
+LifeQuest V3.0 - 觉醒版 (Awakening)
+GUI Client
 """
 import math
 import sys
@@ -10,9 +11,12 @@ from datetime import datetime
 from typing import Optional
 from collections import defaultdict
 
+# 引入 V3.1 新增工具
+from utils import PathManager, set_app_icon
+
 from PyQt6.QtCore import (
     Qt, QPropertyAnimation, QEasingCurve, QSequentialAnimationGroup, 
-    QObject, pyqtProperty, QTimer, QPoint, QDate, QUrl
+    QObject, pyqtProperty, QTimer, QPoint, QDate, QUrl, QSize
 )
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
@@ -22,13 +26,14 @@ from PyQt6.QtWidgets import (
     QGraphicsOpacityEffect, QDateEdit, QGroupBox, QTreeWidget, QHeaderView, QTreeWidgetItem, QFileDialog,
     QRadioButton, QButtonGroup
 )
-from PyQt6.QtGui import QPainter, QPen, QBrush, QColor, QFont, QPainterPath
+from PyQt6.QtGui import QPainter, QPen, QBrush, QColor, QFont, QPainterPath, QIcon
 from PyQt6.QtMultimedia import QSoundEffect
 
 from database import DatabaseManager
 from models import Player, Rival, Quest, QuestStatus, QuestType, QuestAttribute, RivalTier, QuestFrequency
 
-CONFIG_FILE = "config.json"
+# 使用 PathManager 获取配置路径
+CONFIG_FILE = PathManager.get_config_path()
 
 def load_config():
     default_config = {
@@ -40,15 +45,20 @@ def load_config():
         "attr4": "口语(魅力)"
     }
     if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            user_config = json.load(f)
-            for k, v in default_config.items():
-                if k not in user_config:
-                    user_config[k] = v
-            return user_config
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                user_config = json.load(f)
+                for k, v in default_config.items():
+                    if k not in user_config:
+                        user_config[k] = v
+                return user_config
+        except:
+            return default_config
     return default_config
 
 def save_config(data):
+    # 确保目录存在
+    os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
 
@@ -61,7 +71,8 @@ class SoundManager:
 
     def _load_sound(self, name, filename):
         effect = QSoundEffect()
-        path = os.path.abspath(filename)
+        # V3.1: 使用资源路径读取音频 (兼容打包)
+        path = PathManager.get_resource_path(filename)
         if os.path.exists(path):
             effect.setSource(QUrl.fromLocalFile(path))
             self.sounds[name] = effect
@@ -71,7 +82,7 @@ class SoundManager:
     def play(self, name):
         effect = self.sounds.get(name)
         if effect: effect.play()
-        else: QApplication.beep()
+        # else: QApplication.beep() # 静音模式下不beep，体验更好
 
 class ProgressBarAnimator(QObject):
     def __init__(self, bar: QProgressBar, parent=None):
@@ -112,6 +123,7 @@ class FloatingText(QLabel):
         anim_pos.start(); anim_opacity.start()
         QTimer.singleShot(1600, self.deleteLater)
 
+# --- V3.1 Update: 自适应雷达图 ---
 class AttributeRadarWidget(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -132,7 +144,9 @@ class AttributeRadarWidget(QFrame):
         super().paintEvent(event)
         w, h = self.width(), self.height()
         cx, cy = w / 2, h / 2
-        r = min(w, h) / 2 - 45
+        # V3.1: 缩小半径，给文字留出更多空间
+        r = min(w, h) / 2 - 60 
+        
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         angles = [-90, 0, 90, 180]
@@ -179,7 +193,7 @@ class AttributeRadarWidget(QFrame):
 
         painter.setPen(QColor(200, 255, 200))
         font = QFont(self.font())
-        font.setPointSize(10)
+        font.setPointSize(9) # 稍微调小字体
         font.setBold(True)
         painter.setFont(font)
         metrics = painter.fontMetrics()
@@ -188,12 +202,105 @@ class AttributeRadarWidget(QFrame):
             text = self.attr_labels[i]
             tw = metrics.horizontalAdvance(text)
             th = metrics.height()
-            px, py = get_pt(r + 12, ang)
-            if ang == -90: px -= tw / 2
-            elif ang == 0: py += th / 3
-            elif ang == 90: px -= tw / 2; py += th
-            elif ang == 180: px -= tw; py += th / 3
+            
+            # V3.1: 文字位置自适应优化
+            text_r = r + 20
+            px, py = get_pt(text_r, ang)
+            
+            if ang == -90:   px -= tw / 2; py -= 5       # Top
+            elif ang == 0:   px += 10; py += th / 3      # Right
+            elif ang == 90:  px -= tw / 2; py += th      # Bottom
+            elif ang == 180: px -= tw + 10; py += th / 3 # Left
+            
             painter.drawText(int(px), int(py), text)
+
+# --- V3.1 Update: 升级弹窗 ---
+class LevelUpDialog(QDialog):
+    def __init__(self, level, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("LEVEL UP!")
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        
+        layout = QVBoxLayout(self)
+        frame = QFrame()
+        frame.setStyleSheet("""
+            QFrame {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #2e1065, stop:1 #000000);
+                border: 2px solid #f0d84a;
+                border-radius: 15px;
+            }
+        """)
+        frame_layout = QVBoxLayout(frame)
+        frame_layout.setContentsMargins(30, 30, 30, 30)
+        
+        lbl_icon = QLabel("🆙")
+        lbl_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_icon.setStyleSheet("font-size: 60px; background: transparent; border: none;")
+        
+        lbl_title = QLabel(f"等级提升 -> Lv.{level}")
+        lbl_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_title.setStyleSheet("color: #f0d84a; font-size: 28px; font-weight: bold; border: none; background: transparent;")
+        
+        lbl_sub = QLabel("能力突破界限！继续前进！")
+        lbl_sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_sub.setStyleSheet("color: white; font-size: 14px; margin-bottom: 20px; border: none; background: transparent;")
+        
+        btn = QPushButton("收入囊中 (OK)")
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setStyleSheet("""
+            QPushButton { background-color: #f0d84a; color: #000; font-weight: bold; padding: 10px; border-radius: 5px; font-size: 14px;}
+            QPushButton:hover { background-color: #ffe66d; }
+        """)
+        btn.clicked.connect(self.accept)
+        
+        frame_layout.addWidget(lbl_icon)
+        frame_layout.addWidget(lbl_title)
+        frame_layout.addWidget(lbl_sub)
+        frame_layout.addWidget(btn)
+        
+        layout.addWidget(frame)
+        self.resize(350, 280)
+
+# --- V3.1 Update: 新手指引 ---
+class TutorialDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("👋 欢迎来到 LifeQuest")
+        self.resize(600, 450)
+        self.setStyleSheet(get_stylesheet())
+        
+        layout = QVBoxLayout(self)
+        
+        title = QLabel("欢迎来到你的真实人生 RPG")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #7ee787; margin-bottom: 10px;")
+        layout.addWidget(title)
+        
+        content = QLabel("""
+        <p style='font-size:14px; line-height:1.6;'>
+        这是你将生活游戏化的起点。在这里，每一次努力都有回响。<br><br>
+        
+        <b>🎮 核心机制：</b><br>
+        1. <b>接取任务</b>: 在左侧添加现实待办。完成获得 XP 和 金币。<br>
+        2. <b>宿敌系统</b>: 右上角的红色条是你的“惰性”。它会挂机成长，你必须比它卷得更快！<br>
+        3. <b>四维属性</b>: 任务绑定属性（如背单词->记忆/洞察），构建你的能力雷达图。<br>
+        4. <b>商店奖励</b>: 用赚来的金币去“战利品商店”购买现实奖励（如：喝奶茶）。<br>
+        <br>
+        <b>🔥 V3.1 新特性 (觉醒版)：</b><br>
+        - <b>连击系统</b>: 坚持每天打卡，连击数越高，经验金币加成越多 (最高 +50%)。<br>
+        - <b>自动存档</b>: 数据安全存储在系统目录，随意移动程序不丢档。
+        </p>
+        """)
+        content.setWordWrap(True)
+        content.setTextFormat(Qt.TextFormat.RichText)
+        layout.addWidget(content)
+        
+        btn = QPushButton("⚔️ 拔剑起航 (开始)")
+        btn.setMinimumHeight(40)
+        btn.setStyleSheet("font-size: 16px; background-color: #238636; color: white; border-radius: 5px;")
+        btn.clicked.connect(self.accept)
+        layout.addWidget(btn)
 
 def get_stylesheet() -> str:
     return """
@@ -339,9 +446,7 @@ class QuestHistoryDialog(QDialog):
 
     def _load_history(self):
         self.tree.clear()
-        # V3 优化：也显示过期任务
-        quests = self.db.list_quests(status=None) # 取所有
-        # 只要完成、放弃或过期的
+        quests = self.db.list_quests(status=None) 
         quests = [q for q in quests if q.status != QuestStatus.INCOMPLETE]
         
         quests.sort(key=lambda x: x.completed_at or "", reverse=True)
@@ -431,29 +536,27 @@ class AddQuestDialog(QDialog):
         self.difficulty_spin.setValue(2)
         form.addRow("难度 (1-5)", self.difficulty_spin)
         
-        # V3 新增：频率设置
+        # 频率设置
         freq_group = QGroupBox("重复设置")
         freq_layout = QVBoxLayout(freq_group)
         self.rb_once = QRadioButton("一次性任务")
         self.rb_recurring = QRadioButton("长期循环 (每天重置)")
-        self.rb_once.setChecked(True) # 默认一次性
+        self.rb_once.setChecked(True) 
         bg = QButtonGroup(self)
         bg.addButton(self.rb_once); bg.addButton(self.rb_recurring)
         freq_layout.addWidget(self.rb_once)
         freq_layout.addWidget(self.rb_recurring)
         
-        # 休息日设置 (默认全选)
         days_layout = QHBoxLayout()
         self.day_checks = []
         days_label = ["一", "二", "三", "四", "五", "六", "日"]
         for i, label in enumerate(days_label):
             cb = QCheckBox(label)
-            cb.setChecked(True) # 默认每天都做
+            cb.setChecked(True)
             self.day_checks.append(cb)
             days_layout.addWidget(cb)
         freq_layout.addLayout(days_layout)
         
-        # 逻辑联动：选一次性时，禁用星期选择
         self.rb_once.toggled.connect(lambda c: self._toggle_days(not c))
         self._toggle_days(False)
         
@@ -477,14 +580,11 @@ class AddQuestDialog(QDialog):
             elif quest_to_edit.attribute == QuestAttribute.CHARISMA: self.attr_combo.setCurrentText(config["attr4"])
             else: self.attr_combo.setCurrentText("其他 (无属性)")
             
-            # 回填频率
             if quest_to_edit.frequency == QuestFrequency.RECURRING:
                 self.rb_recurring.setChecked(True)
-                # 解析 active_days "1,3,5"
                 if quest_to_edit.active_days:
                     active_set = set(quest_to_edit.active_days.split(","))
                     for i, cb in enumerate(self.day_checks):
-                        # i是从0开始(周一)，iso weekday是1开始
                         cb.setChecked(str(i+1) in active_set)
             else:
                 self.rb_once.setChecked(True)
@@ -511,7 +611,6 @@ class AddQuestDialog(QDialog):
         qt = QuestType.DAILY if self.type_combo.currentText() == QuestType.DAILY.value else QuestType.MAIN
         diff = self.difficulty_spin.value()
         
-        # V3 频率数据
         freq = QuestFrequency.RECURRING if self.rb_recurring.isChecked() else QuestFrequency.ONCE
         active_days_str = ""
         if freq == QuestFrequency.RECURRING:
@@ -625,9 +724,12 @@ class CompleteQuestDialog(QDialog):
     def get_duration(self): return self.time_spin.value()
 
 class MainWindow(QMainWindow):
-    def __init__(self, db_path: str = "lifequest.db"):
+    def __init__(self):
         super().__init__()
-        self.db = DatabaseManager(db_path)
+        
+        # V3.1: 初始化时使用 PathManager
+        # 如果不传参数，DatabaseManager 会自动使用系统路径
+        self.db = DatabaseManager() 
         self.db.create_tables()
         self.db.init_player_if_missing()
         
@@ -637,10 +739,9 @@ class MainWindow(QMainWindow):
         self._animator: Optional[ProgressBarAnimator] = None
         self._anim_group: Optional[QSequentialAnimationGroup] = None
         
-        # V3: 记录当前日期，用于跨天检测
         self._current_date_str = datetime.now().strftime("%Y-%m-%d")
 
-        self.setWindowTitle("LifeQuest — 目标竞速篇")
+        self.setWindowTitle("LifeQuest V3.1 - Awakening")
         self.setMinimumSize(950, 650)
         self.resize(1050, 750)
         self.setStyleSheet(get_stylesheet())
@@ -651,6 +752,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(16)
         layout.setContentsMargins(20, 20, 20, 20)
 
+        # Status Frame
         status_frame = QFrame(); status_frame.setObjectName("statusFrame")
         status_layout = QVBoxLayout(status_frame)
 
@@ -665,15 +767,27 @@ class MainWindow(QMainWindow):
         title_layout.addWidget(self.countdown_label)
         status_layout.addLayout(title_layout)
 
+        # Player Stats Row
         p_layout = QHBoxLayout()
         self.level_label = QLabel("你 Lv.1"); self.level_label.setObjectName("levelLabel")
         self.xp_bar = QProgressBar(); self.xp_bar.setObjectName("playerBar"); self.xp_bar.setFormat("你的进度: %v / %m")
         self.gold_label = QLabel("🪙 0"); self.gold_label.setObjectName("goldLabel")
+        
+        # V3.1: 连击显示
+        self.streak_label = QLabel("🔥 0 天")
+        self.streak_label.setStyleSheet("color: #8b949e; font-weight: bold; font-size: 14px; border: 1px solid #30363d; border-radius: 4px; padding: 2px 6px;")
+        
         self.focus_label = QLabel("⏳ 今日专注: 0m")
         self.focus_label.setStyleSheet("color: #79c0ff; font-weight: bold;")
-        p_layout.addWidget(self.level_label); p_layout.addWidget(self.xp_bar, 1); p_layout.addWidget(self.gold_label); p_layout.addWidget(self.focus_label)
+        
+        p_layout.addWidget(self.level_label)
+        p_layout.addWidget(self.xp_bar, 1)
+        p_layout.addWidget(self.gold_label)
+        p_layout.addWidget(self.streak_label) # Add Streak
+        p_layout.addWidget(self.focus_label)
         status_layout.addLayout(p_layout)
 
+        # Rival Stats Row
         r_layout = QHBoxLayout()
         self.rival_lvl_label = QLabel("敌 Lv.1"); self.rival_lvl_label.setObjectName("rivalLabel")
         self.rival_bar = QProgressBar(); self.rival_bar.setObjectName("rivalBar"); self.rival_bar.setFormat("卷王进度: %v / %m")
@@ -681,8 +795,10 @@ class MainWindow(QMainWindow):
         status_layout.addLayout(r_layout)
         layout.addWidget(status_frame)
 
+        # Splitter
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
+        # Quest Area
         quest_frame = QFrame(); quest_frame.setObjectName("questFrame")
         quest_layout = QVBoxLayout(quest_frame)
         quest_title = QLabel("📜 任务板 · Quest Board"); quest_title.setObjectName("titleLabel"); quest_layout.addWidget(quest_title)
@@ -699,6 +815,7 @@ class MainWindow(QMainWindow):
         self.quest_scroll.setWidget(self.quest_widget); quest_layout.addWidget(self.quest_scroll)
         splitter.addWidget(quest_frame)
 
+        # Attribute Area
         attr_frame = QFrame(); attr_frame.setObjectName("attrFrame")
         attr_layout = QVBoxLayout(attr_frame)
         attr_title = QLabel("⚔ 属性 · Attributes"); attr_title.setObjectName("titleLabel"); attr_layout.addWidget(attr_title)
@@ -719,34 +836,37 @@ class MainWindow(QMainWindow):
         self._quest_checkboxes = {}
         self._refresh_ui()
 
-        # --- V3 定时器 ---
-        # 1. 跨天检查定时器 (每分钟检查一次)
+        # Check for Tutorial (V3.1 Feature)
+        self._check_new_user()
+
+        # Timers
         self.date_check_timer = QTimer(self)
         self.date_check_timer.timeout.connect(self._check_date_change)
         self.date_check_timer.start(60000)
 
-        # 2. 对手随机成长定时器 (每10分钟触发一次)
         self.rival_grow_timer = QTimer(self)
         self.rival_grow_timer.timeout.connect(self._on_rival_timer)
-        self.rival_grow_timer.start(600000) # 10分钟 = 600000毫秒
+        self.rival_grow_timer.start(600000) 
+
+    def _check_new_user(self):
+        """V3.1: 如果是全新用户（Lv1且无经验无任务），弹出新手引导"""
+        p = self.db.get_player()
+        quests_count = len(self.db.list_quests(None))
+        if p.level == 1 and p.xp == 0 and quests_count == 0:
+            QTimer.singleShot(500, lambda: TutorialDialog(self).exec())
 
     def _check_date_change(self):
-        """检测是否跨天，如果跨天则刷新任务状态"""
         now_str = datetime.now().strftime("%Y-%m-%d")
         if now_str != self._current_date_str:
-            print(f"检测到跨天: {self._current_date_str} -> {now_str}")
             self._current_date_str = now_str
-            self.db.check_daily_reset() # 核心：重置循环任务
+            self.db.check_daily_reset()
             self._refresh_ui()
             FloatingText("📅 新的一天开始了！", self.get_center_pos(), self, "cyan", 28)
 
     def _on_rival_timer(self):
-        """对手挂机成长"""
         leveled_up, xp_gained = self.db.rival_random_growth()
         if xp_gained > 0:
             self._refresh_stats()
-            # 可以选择是否弹窗提示，或者只是默默变强
-            # 如果升级了，给个提示
             if leveled_up:
                 r = self.db.get_rival()
                 FloatingText(f"😈 宿敌升级了! Lv.{r.level}", self.get_center_pos() + QPoint(0, -50), self, "#f85149", 24)
@@ -788,6 +908,16 @@ class MainWindow(QMainWindow):
         self.xp_bar.setMaximum(p.next_level_xp); self.xp_bar.setValue(p.xp)
         self.gold_label.setText(f"🪙 {p.gold}")
         
+        # V3.1: 更新连击UI
+        streak = getattr(p, "streak_days", 0)
+        self.streak_label.setText(f"🔥 连击: {streak}天")
+        if streak >= 3:
+             self.streak_label.setStyleSheet("color: #ff9b5e; font-weight: bold; font-size: 14px; background: #3d1f14; border: 1px solid #ff9b5e; border-radius: 4px; padding: 2px 6px;")
+        elif streak >= 1:
+             self.streak_label.setStyleSheet("color: #ff9b5e; font-weight: bold; font-size: 14px; border: 1px solid #ff9b5e; border-radius: 4px; padding: 2px 6px;")
+        else:
+             self.streak_label.setStyleSheet("color: #8b949e; font-weight: bold; font-size: 14px; border: 1px solid #30363d; border-radius: 4px; padding: 2px 6px;")
+
         total_mins = self.db.get_today_study_time()
         hours = total_mins // 60; mins = total_mins % 60
         self.focus_label.setText(f"⏳ 今日专注: {hours}h {mins}m" if hours > 0 else f"⏳ 今日专注: {mins}m")
@@ -812,7 +942,6 @@ class MainWindow(QMainWindow):
         for q in quests:
             row = QWidget(); row_layout = QHBoxLayout(row); row_layout.setContentsMargins(0, 4, 0, 4)
             
-            # V3: 图标显示循环
             prefix = "[循环]" if q.frequency == QuestFrequency.RECURRING else "[一次]"
             cb = QCheckBox(f"{prefix} {q.name}")
             cb.setToolTip(q.description)
@@ -859,7 +988,10 @@ class MainWindow(QMainWindow):
 
         pos = self.get_center_pos() 
         player_before = self.db.get_player()
-        p_after, gained_xp, gained_gold = self.db.complete_quest(q.id, duration_mins=duration)
+        
+        # V3.1 Update: 接收 4 个返回值 (新增 is_level_up)
+        p_after, gained_xp, gained_gold, is_level_up = self.db.complete_quest(q.id, duration_mins=duration)
+        
         if not p_after:
             sender.setCheckState(Qt.CheckState.Unchecked)
             return
@@ -870,8 +1002,16 @@ class MainWindow(QMainWindow):
             FloatingText("💥 暴击成长！", pos + QPoint(0, 30), self, "#f0d84a", font_size=28)
         else:
             self.sfx.play("success")
+            
         FloatingText(f"✨ +{gained_xp} XP | 🪙 +{gained_gold}", pos, self, "lime", font_size=24)
+        
+        # 播放升级动画
         self._play_xp_animation(player_before, p_after)
+        
+        # V3.1: 弹出升级窗口
+        if is_level_up:
+            LevelUpDialog(p_after.level, self).exec()
+            
         self._refresh_ui()
 
     def _play_xp_animation(self, before: Player, after: Player) -> None:
@@ -895,7 +1035,6 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted: return
         data = dialog.get_quest_data()
         if not data: return
-        # data: name, desc, qt, attr, diff, freq, active_days
         name, desc, qt, attr, diff, freq, active_days = data
         q = Quest(name=name, description=desc, quest_type=qt, attribute=attr, difficulty=diff, frequency=freq, active_days=active_days)
         self.db.insert_quest(q)
@@ -907,7 +1046,6 @@ class MainWindow(QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             data = dialog.get_quest_data()
             if data:
-                # V3: 更新所有字段
                 q.name, q.description, q.quest_type, q.attribute, q.difficulty, q.frequency, q.active_days = data
                 self.db.update_quest(q)
                 self._refresh_quest_list()
@@ -931,6 +1069,10 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    
+    # V3.1: 设置全局任务栏图标
+    set_app_icon(app, "app.ico")
+    
     win = MainWindow()
     win.show()
     sys.exit(app.exec())

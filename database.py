@@ -1,5 +1,7 @@
 import sqlite3
 import random
+import os
+import platform
 from pathlib import Path
 from typing import List, Optional, Tuple
 from datetime import datetime, timedelta
@@ -10,9 +12,28 @@ def calc_next_level_xp(level: int, base: int = 100, exponent: float = 1.2) -> in
     return max(base, int(base * (level ** exponent)))
 
 class DatabaseManager:
-    def __init__(self, db_path: str = "lifequest.db"):
-        self.db_path = Path(db_path)
+    def __init__(self, db_path: str = None):
+        # V3.1 修改：如果未指定路径，则使用系统用户目录，实现数据隐形存储
+        if db_path is None:
+            self.db_path = self._get_system_db_path()
+        else:
+            self.db_path = Path(db_path)
+        
         self._ensure_connection()
+
+    def _get_system_db_path(self) -> Path:
+        """获取系统特定的数据存储路径 (AppData or Home)"""
+        app_name = "LifeQuest"
+        if platform.system() == "Windows":
+            base_path = os.getenv("APPDATA")
+        else:
+            base_path = os.path.expanduser("~")
+        
+        data_dir = os.path.join(base_path, app_name)
+        if not os.path.exists(data_dir):
+            os.makedirs(data_dir)
+            
+        return Path(os.path.join(data_dir, "lifequest.db"))
 
     def _ensure_connection(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -23,32 +44,42 @@ class DatabaseManager:
         return conn
 
     def _migrate_schema(self):
-        """V3.0 数据库自动升级：添加频率和活跃日"""
+        """数据库自动热更新：检测并补充缺失的字段"""
         with self.get_connection() as conn:
-            # 升级1: duration
+            # V2 更新: 专注时长
             try: conn.execute("SELECT duration FROM quest LIMIT 1")
             except: 
                 try: conn.execute("ALTER TABLE quest ADD COLUMN duration INTEGER DEFAULT 0")
                 except: pass
             
-            # 升级2: tier
+            # V2 更新: 对手分级
             try: conn.execute("SELECT tier FROM rival LIMIT 1")
             except: 
                 try: conn.execute(f"ALTER TABLE rival ADD COLUMN tier TEXT DEFAULT '{RivalTier.NORMAL.value}'")
                 except: pass
             
-            # 升级3: frequency (V3)
+            # V3.0 更新: 任务频率
             try: conn.execute("SELECT frequency FROM quest LIMIT 1")
             except:
                 try: 
                     conn.execute(f"ALTER TABLE quest ADD COLUMN frequency TEXT DEFAULT '{QuestFrequency.ONCE.value}'")
-                    # 默认让旧任务都变成一次性，防止逻辑混乱，用户可手动改
                 except: pass
 
-            # 升级4: active_days (V3)
+            # V3.0 更新: 生效日
             try: conn.execute("SELECT active_days FROM quest LIMIT 1")
             except:
                 try: conn.execute("ALTER TABLE quest ADD COLUMN active_days TEXT DEFAULT ''")
+                except: pass
+            
+            # V3.1 更新: 连击系统 (正反馈增强)
+            try: conn.execute("SELECT streak_days FROM player LIMIT 1")
+            except:
+                try: conn.execute("ALTER TABLE player ADD COLUMN streak_days INTEGER DEFAULT 0")
+                except: pass
+            
+            try: conn.execute("SELECT last_active_date FROM player LIMIT 1")
+            except:
+                try: conn.execute("ALTER TABLE player ADD COLUMN last_active_date TEXT DEFAULT ''")
                 except: pass
 
             conn.execute("""
@@ -62,11 +93,17 @@ class DatabaseManager:
         with self.get_connection() as conn:
             conn.executescript(f"""
                 CREATE TABLE IF NOT EXISTS player (
-                    id INTEGER PRIMARY KEY CHECK (id = 1),
-                    level INTEGER NOT NULL DEFAULT 1, xp INTEGER NOT NULL DEFAULT 0,
-                    next_level_xp INTEGER NOT NULL DEFAULT 100, gold INTEGER NOT NULL DEFAULT 0,
-                    perception REAL NOT NULL DEFAULT 5.0, insight REAL NOT NULL DEFAULT 5.0,
-                    logic REAL NOT NULL DEFAULT 5.0, charisma REAL NOT NULL DEFAULT 5.0
+                    id INTEGER PRIMARY KEY CHECK (id = 1), 
+                    level INTEGER NOT NULL DEFAULT 1, 
+                    xp INTEGER NOT NULL DEFAULT 0, 
+                    next_level_xp INTEGER NOT NULL DEFAULT 100, 
+                    gold INTEGER NOT NULL DEFAULT 0, 
+                    perception REAL NOT NULL DEFAULT 5.0, 
+                    insight REAL NOT NULL DEFAULT 5.0, 
+                    logic REAL NOT NULL DEFAULT 5.0, 
+                    charisma REAL NOT NULL DEFAULT 5.0,
+                    streak_days INTEGER DEFAULT 0,
+                    last_active_date TEXT DEFAULT ''
                 );
                 CREATE TABLE IF NOT EXISTS rival (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -87,19 +124,11 @@ class DatabaseManager:
             """)
         self._migrate_schema()
 
-    # --- V3.0 核心逻辑：每日重置与过期处理 ---
     def check_daily_reset(self):
-        """
-        每次启动或跨天时调用。
-        检查所有 '长期循环' 任务：
-        1. 如果上次完成时间不是今天 -> 视为新的一天。
-        2. 如果已完成 -> 存档一条副本到历史记录(状态=完成)，然后重置本体为(未完成)。
-        3. 如果未完成且日期是昨天以前 -> 存档一条副本到历史记录(状态=过期)，然后重置本体。
-        """
+        """每日重置检查：处理循环任务的状态重置与过期判定"""
         today_str = datetime.now().strftime("%Y-%m-%d")
         
         with self.get_connection() as conn:
-            # 获取所有循环任务
             cursor = conn.execute("SELECT * FROM quest WHERE frequency = ?", (QuestFrequency.RECURRING.value,))
             quests = [Quest.from_db_row(row) for row in cursor.fetchall()]
             
@@ -108,22 +137,19 @@ class DatabaseManager:
                 if q.completed_at:
                     last_date = q.completed_at.split(" ")[0]
                 
-                # 如果最后更新日期不是今天（说明跨天了）
                 if last_date != today_str:
-                    # 情况 A: 昨天(或更早)完成了 -> 存档功绩
+                    # 如果之前已完成 -> 归档副本到历史
                     if q.status == QuestStatus.COMPLETE:
-                        # 插入历史记录 (副本)
                         conn.execute(
                             """INSERT INTO quest (name, description, quest_type, attribute, difficulty, status, completed_at, duration, frequency, active_days)
                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                             (q.name, q.description, q.quest_type.value, q.attribute.value, q.difficulty, 
                              QuestStatus.COMPLETE.value, q.completed_at, q.duration, 
-                             QuestFrequency.ONCE.value, "") # 历史记录本身不再循环
+                             QuestFrequency.ONCE.value, "")
                         )
                     
-                    # 情况 B: 昨天没做 -> 记录羞耻的过期 (仅当它是未完成状态时)
+                    # 如果之前未完成 -> 归档为过期 (羞耻记录)
                     elif q.status == QuestStatus.INCOMPLETE:
-                        # 插入过期记录
                         conn.execute(
                             """INSERT INTO quest (name, description, quest_type, attribute, difficulty, status, completed_at, duration, frequency, active_days)
                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -132,23 +158,23 @@ class DatabaseManager:
                              QuestFrequency.ONCE.value, "")
                         )
 
-                    # 重置本体任务状态为今天待办
+                    # 重置本体
                     conn.execute(
                         "UPDATE quest SET status = ?, completed_at = NULL, duration = 0 WHERE id = ?",
                         (QuestStatus.INCOMPLETE.value, q.id)
                     )
 
     def init_player_if_missing(self) -> None:
-        # 先做每日重置检查
         self.check_daily_reset()
-        
         with self.get_connection() as conn:
+            # 初始化玩家
             if conn.execute("SELECT 1 FROM player WHERE id = 1").fetchone() is None:
                 conn.execute(
-                    """INSERT INTO player (id, level, xp, next_level_xp, gold, perception, insight, logic, charisma)
-                       VALUES (1, 1, 0, ?, 0, 5.0, 5.0, 5.0, 5.0)""", (calc_next_level_xp(1),)
+                    """INSERT INTO player (id, level, xp, next_level_xp, gold, perception, insight, logic, charisma, streak_days, last_active_date)
+                       VALUES (1, 1, 0, ?, 0, 5.0, 5.0, 5.0, 5.0, 0, '')""", (calc_next_level_xp(1),)
                 )
             
+            # 初始化或更新宿敌
             now = datetime.now()
             now_str = now.isoformat()
             row = conn.execute("SELECT * FROM rival WHERE id = 1").fetchone()
@@ -160,7 +186,7 @@ class DatabaseManager:
                     (calc_next_level_xp(1), now_str, RivalTier.NORMAL.value),
                 )
             else:
-                # 离线结算逻辑 (保持原有)
+                # 离线结算逻辑
                 last_date = datetime.fromisoformat(row["last_login_date"])
                 tier_val = row["tier"]
                 multiplier = 1.0
@@ -168,24 +194,15 @@ class DatabaseManager:
                 elif "1.5x" in tier_val: multiplier = 1.5
                 elif "2.0x" in tier_val: multiplier = 2.0
                 
-                # 如果只是短时间重开(同一天)，不进行大额结算，依靠实时挂机
                 days_diff = (now.date() - last_date.date()).days
                 if days_diff > 0:
                     rival = Rival.from_db_row(tuple(row))
-                    total_xp_gain = 0
-                    total_attr_gain = 0.0
+                    total_xp = 0
                     for _ in range(days_diff):
                         events = random.randint(2, 4)
                         for _ in range(events):
-                            base_xp = random.randint(30, 50)
-                            xp_gain = int(base_xp * multiplier)
-                            total_xp_gain += xp_gain
-                            total_attr_gain += (0.1 * multiplier)
-                    rival.xp += total_xp_gain
-                    rival.perception += total_attr_gain
-                    rival.insight += total_attr_gain
-                    rival.logic += total_attr_gain
-                    rival.charisma += total_attr_gain
+                            total_xp += int(random.randint(30, 50) * multiplier)
+                    rival.xp += total_xp
                     while rival.xp >= rival.next_level_xp:
                         rival.xp -= rival.next_level_xp
                         rival.level += 1
@@ -193,59 +210,69 @@ class DatabaseManager:
                     rival.last_login_date = now_str
                     self.update_rival(rival)
                 else:
-                    # 更新最后登录时间
                     conn.execute("UPDATE rival SET last_login_date = ? WHERE id = 1", (now_str,))
 
-    # --- V3.0 对手实时随机成长 ---
     def rival_random_growth(self) -> Tuple[bool, int]:
-        """
-        主界面定时调用。
-        返回: (是否升级了, 获得的XP)
-        """
         r = self.get_rival()
         if not r: return False, 0
         
-        # 获取倍率
         multiplier = 1.0
         if "0.5x" in r.tier: multiplier = 0.5
         elif "1.5x" in r.tier: multiplier = 1.5
         elif "2.0x" in r.tier: multiplier = 2.0
 
-        # 随机获得少量经验 (模拟对手正在学习)
-        base_xp = random.randint(5, 15)
-        xp_gain = int(base_xp * multiplier)
-        attr_gain = 0.02 * multiplier
-
+        xp_gain = int(random.randint(5, 15) * multiplier)
         r.xp += xp_gain
-        r.perception += attr_gain
-        r.insight += attr_gain
-        r.logic += attr_gain
-        r.charisma += attr_gain
-        
-        leveled_up = False
+        leveled = False
         while r.xp >= r.next_level_xp:
             r.xp -= r.next_level_xp
             r.level += 1
             r.next_level_xp = calc_next_level_xp(r.level)
-            leveled_up = True
-            
-        # 更新最后登录时间，防止下次启动重复计算
+            leveled = True
+        
         r.last_login_date = datetime.now().isoformat()
         self.update_rival(r)
-        return leveled_up, xp_gain
+        return leveled, xp_gain
 
     # --- CRUD ---
     def get_player(self) -> Optional[Player]:
         with self.get_connection() as conn:
             row = conn.execute("SELECT * FROM player WHERE id = 1").fetchone()
-            return Player.from_db_row(tuple(row)) if row else None
+            if not row: return None
+            # 手动构建 Player 对象，防止 models.py 定义与数据库不一致导致报错
+            # 如果 models.py 的 Player 类没有 streak_days 字段，这里会忽略它，保证不崩
+            p_data = dict(row)
+            try:
+                # 尝试完整映射
+                p = Player.from_db_row(tuple(row))
+                # 动态补丁: 如果 models.py 还没更新 streak 字段，我们手动挂载上去，方便 GUI 读取
+                if "streak_days" in p_data and not hasattr(p, "streak_days"):
+                    setattr(p, "streak_days", p_data["streak_days"])
+                if "last_active_date" in p_data and not hasattr(p, "last_active_date"):
+                    setattr(p, "last_active_date", p_data["last_active_date"])
+                return p
+            except:
+                # 降级处理 (为了兼容旧版 models.py)
+                # 假设 models.py 的 Player 还是旧的构造函数
+                return Player(
+                    id=p_data['id'], level=p_data['level'], xp=p_data['xp'],
+                    next_level_xp=p_data['next_level_xp'], gold=p_data['gold'],
+                    perception=p_data['perception'], insight=p_data['insight'],
+                    logic=p_data['logic'], charisma=p_data['charisma']
+                )
 
     def update_player(self, p: Player) -> None:
+        # 获取 streak 数据，如果 Player 对象里没有（旧 models），默认为 0
+        s_days = getattr(p, "streak_days", 0)
+        l_date = getattr(p, "last_active_date", "")
+        
         with self.get_connection() as conn:
             conn.execute(
                 """UPDATE player SET level=?, xp=?, next_level_xp=?, gold=?,
-                   perception=?, insight=?, logic=?, charisma=? WHERE id = 1""",
-                (p.level, p.xp, p.next_level_xp, p.gold, p.perception, p.insight, p.logic, p.charisma)
+                   perception=?, insight=?, logic=?, charisma=?, streak_days=?, last_active_date=?
+                   WHERE id = 1""",
+                (p.level, p.xp, p.next_level_xp, p.gold, p.perception, p.insight, 
+                 p.logic, p.charisma, s_days, l_date)
             )
 
     def get_rival(self) -> Optional[Rival]:
@@ -259,7 +286,8 @@ class DatabaseManager:
                 """UPDATE rival SET level=?, xp=?, next_level_xp=?,
                    perception=?, insight=?, logic=?, charisma=?, last_login_date=?, tier=?
                    WHERE id = 1""",
-                (r.level, r.xp, r.next_level_xp, r.perception, r.insight, r.logic, r.charisma, r.last_login_date, r.tier)
+                (r.level, r.xp, r.next_level_xp, r.perception, r.insight, r.logic, 
+                 r.charisma, r.last_login_date, r.tier)
             )
 
     def insert_quest(self, q: Quest) -> int:
@@ -284,7 +312,6 @@ class DatabaseManager:
 
     def list_quests(self, status: Optional[QuestStatus] = None) -> List[Quest]:
         with self.get_connection() as conn:
-            # V3 修改：在获取任务列表时，过滤掉“今天休息”的循环任务
             sql = "SELECT * FROM quest WHERE 1=1"
             params = []
             if status:
@@ -294,17 +321,15 @@ class DatabaseManager:
             rows = conn.execute(sql, params).fetchall()
             all_quests = [Quest.from_db_row(tuple(r)) for r in rows]
             
-            # 过滤逻辑：如果是未完成的任务，且是循环任务，检查今天是否是工作日
             final_quests = []
-            weekday_now = str(datetime.now().isoweekday()) # 1-7
+            weekday_now = str(datetime.now().isoweekday())
             
             for q in all_quests:
+                # 隐藏今天不该做的循环任务
                 if status == QuestStatus.INCOMPLETE and q.frequency == QuestFrequency.RECURRING:
-                    # 如果设置了 active_days (不为空)，且今天不在其中 -> 隐藏
                     if q.active_days and weekday_now not in q.active_days:
                         continue
                 final_quests.append(q)
-                
             return final_quests
 
     def add_reward(self, name: str, cost: int, desc: str = ""):
@@ -327,45 +352,95 @@ class DatabaseManager:
             p = self.get_player()
             r_row = conn.execute("SELECT * FROM reward WHERE id = ?", (reward_id,)).fetchone()
             if not r_row: return False, "商品不存在"
-            cost = r_row["cost"]
-            if p.gold < cost: return False, f"金币不足！需要 {cost}"
-            p.gold -= cost
+            if p.gold < r_row["cost"]: return False, f"金币不足 (需 {r_row['cost']})"
+            p.gold -= r_row["cost"]
             self.update_player(p)
             return True, f"购买成功：{r_row['name']}"
 
-    def complete_quest(self, quest_id: int, duration_mins: int = 0) -> Tuple[Optional[Player], int, int]:
+    # --- V3.1 核心：完成任务 (含连击计算与升级检测) ---
+    def complete_quest(self, quest_id: int, duration_mins: int = 0) -> Tuple[Optional[Player], int, int, bool]:
+        """
+        返回: (更新后的玩家对象, 获得的XP, 获得的金币, 是否升级)
+        注意：GUI 需要适配接收 4 个返回值
+        """
         quest = self.get_quest(quest_id)
-        if not quest or quest.status == QuestStatus.COMPLETE: return None, 0, 0
+        if not quest or quest.status == QuestStatus.COMPLETE: return None, 0, 0, False
+        
         player = self.get_player()
-        xp_gain = 20 + quest.difficulty * 15
-        gold_gain = 10 + quest.difficulty * 5
+        
+        # --- 连击计算 (Streak Logic) ---
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        yesterday_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        
+        # 兼容处理: 确保字段存在
+        current_streak = getattr(player, "streak_days", 0)
+        last_active = getattr(player, "last_active_date", "")
+        
+        if last_active != today_str:
+            if last_active == yesterday_str:
+                current_streak += 1 # 连续签到
+            else:
+                current_streak = 1 # 断签重置
+            
+            # 回写到对象
+            setattr(player, "streak_days", current_streak)
+            setattr(player, "last_active_date", today_str)
+
+        # --- 奖励计算 (含连击加成) ---
+        base_xp = 20 + quest.difficulty * 15
+        base_gold = 10 + quest.difficulty * 5
+        
+        # 连击加成：每天 +1%，上限 50%
+        bonus_ratio = min(0.5, current_streak * 0.01)
+        xp_gain = int(base_xp * (1 + bonus_ratio))
+        gold_gain = int(base_gold * (1 + bonus_ratio))
+        
         attr_gain = 1 if quest.difficulty >= 3 else 0
-        player.xp += xp_gain; player.gold += gold_gain
+
+        player.xp += xp_gain
+        player.gold += gold_gain
+        
         if quest.attribute != QuestAttribute.OTHER:
             if quest.attribute == QuestAttribute.PERCEPTION: player.perception += attr_gain
             elif quest.attribute == QuestAttribute.INSIGHT: player.insight += attr_gain
             elif quest.attribute == QuestAttribute.LOGIC: player.logic += attr_gain
             elif quest.attribute == QuestAttribute.CHARISMA: player.charisma += attr_gain
+        
+        # 升级检测
+        leveled_up = False
         while player.xp >= player.next_level_xp:
-            player.xp -= player.next_level_xp; player.level += 1
+            player.xp -= player.next_level_xp
+            player.level += 1
             player.next_level_xp = calc_next_level_xp(player.level)
+            leveled_up = True
+            
         self.update_player(player)
+        
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
         with self.get_connection() as conn:
             conn.execute("UPDATE quest SET status = ?, completed_at = ?, duration = ? WHERE id = ?", 
                 (QuestStatus.COMPLETE.value, now_str, duration_mins, quest_id))
-        return player, xp_gain, gold_gain
+            
+        return player, xp_gain, gold_gain, leveled_up
 
     def abandon_quest(self, quest_id: int) -> Tuple[int, int]:
         quest = self.get_quest(quest_id)
         if not quest: return 0, 0
         penalty_gold = quest.difficulty * 5
         rival_gain = quest.difficulty * 10
-        p = self.get_player(); p.gold = max(0, p.gold - penalty_gold); self.update_player(p)
-        r = self.get_rival(); r.xp += rival_gain
+        
+        p = self.get_player()
+        p.gold = max(0, p.gold - penalty_gold)
+        self.update_player(p)
+        
+        r = self.get_rival()
+        r.xp += rival_gain
         while r.xp >= r.next_level_xp:
-            r.xp -= r.next_level_xp; r.level += 1; r.next_level_xp = calc_next_level_xp(r.level)
+            r.xp -= r.next_level_xp
+            r.level += 1
+            r.next_level_xp = calc_next_level_xp(r.level)
         self.update_rival(r)
+        
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
         with self.get_connection() as conn:
             conn.execute("UPDATE quest SET status = ?, completed_at = ? WHERE id = ?", 
