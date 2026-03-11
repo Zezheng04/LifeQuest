@@ -1,5 +1,5 @@
 ﻿"""
-LifeQuest V3.0 - 觉醒版 (Awakening)
+LifeQuest V3.1 - 觉醒版 (Awakening)
 GUI Client
 """
 import math
@@ -11,7 +11,6 @@ from datetime import datetime
 from typing import Optional
 from collections import defaultdict
 
-# 引入 V3.1 新增工具
 from utils import PathManager, set_app_icon
 
 from PyQt6.QtCore import (
@@ -32,7 +31,6 @@ from PyQt6.QtMultimedia import QSoundEffect
 from database import DatabaseManager
 from models import Player, Rival, Quest, QuestStatus, QuestType, QuestAttribute, RivalTier, QuestFrequency
 
-# 使用 PathManager 获取配置路径
 CONFIG_FILE = PathManager.get_config_path()
 
 def load_config():
@@ -57,7 +55,6 @@ def load_config():
     return default_config
 
 def save_config(data):
-    # 确保目录存在
     os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
@@ -71,7 +68,6 @@ class SoundManager:
 
     def _load_sound(self, name, filename):
         effect = QSoundEffect()
-        # V3.1: 使用资源路径读取音频 (兼容打包)
         path = PathManager.get_resource_path(filename)
         if os.path.exists(path):
             effect.setSource(QUrl.fromLocalFile(path))
@@ -82,7 +78,6 @@ class SoundManager:
     def play(self, name):
         effect = self.sounds.get(name)
         if effect: effect.play()
-        # else: QApplication.beep() # 静音模式下不beep，体验更好
 
 class ProgressBarAnimator(QObject):
     def __init__(self, bar: QProgressBar, parent=None):
@@ -123,7 +118,6 @@ class FloatingText(QLabel):
         anim_pos.start(); anim_opacity.start()
         QTimer.singleShot(1600, self.deleteLater)
 
-# --- V3.1 Update: 自适应雷达图 ---
 class AttributeRadarWidget(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -144,7 +138,6 @@ class AttributeRadarWidget(QFrame):
         super().paintEvent(event)
         w, h = self.width(), self.height()
         cx, cy = w / 2, h / 2
-        # V3.1: 缩小半径，给文字留出更多空间
         r = min(w, h) / 2 - 60 
         
         painter = QPainter(self)
@@ -193,7 +186,7 @@ class AttributeRadarWidget(QFrame):
 
         painter.setPen(QColor(200, 255, 200))
         font = QFont(self.font())
-        font.setPointSize(9) # 稍微调小字体
+        font.setPointSize(9) 
         font.setBold(True)
         painter.setFont(font)
         metrics = painter.fontMetrics()
@@ -203,18 +196,16 @@ class AttributeRadarWidget(QFrame):
             tw = metrics.horizontalAdvance(text)
             th = metrics.height()
             
-            # V3.1: 文字位置自适应优化
             text_r = r + 20
             px, py = get_pt(text_r, ang)
             
-            if ang == -90:   px -= tw / 2; py -= 5       # Top
-            elif ang == 0:   px += 10; py += th / 3      # Right
-            elif ang == 90:  px -= tw / 2; py += th      # Bottom
-            elif ang == 180: px -= tw + 10; py += th / 3 # Left
+            if ang == -90:   px -= tw / 2; py -= 5       
+            elif ang == 0:   px += 10; py += th / 3      
+            elif ang == 90:  px -= tw / 2; py += th      
+            elif ang == 180: px -= tw + 10; py += th / 3 
             
             painter.drawText(int(px), int(py), text)
 
-# --- V3.1 Update: 升级弹窗 ---
 class LevelUpDialog(QDialog):
     def __init__(self, level, parent=None):
         super().__init__(parent)
@@ -262,7 +253,6 @@ class LevelUpDialog(QDialog):
         layout.addWidget(frame)
         self.resize(350, 280)
 
-# --- V3.1 Update: 新手指引 ---
 class TutorialDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -284,12 +274,12 @@ class TutorialDialog(QDialog):
         <b>🎮 核心机制：</b><br>
         1. <b>接取任务</b>: 在左侧添加现实待办。完成获得 XP 和 金币。<br>
         2. <b>宿敌系统</b>: 右上角的红色条是你的“惰性”。它会挂机成长，你必须比它卷得更快！<br>
-        3. <b>四维属性</b>: 任务绑定属性（如背单词->记忆/洞察），构建你的能力雷达图。<br>
-        4. <b>商店奖励</b>: 用赚来的金币去“战利品商店”购买现实奖励（如：喝奶茶）。<br>
+        3. <b>战利品商店</b>: 用赚来的金币去商店购买现实奖励（如：喝奶茶）。<br>
         <br>
-        <b>🔥 V3.1 新特性 (觉醒版)：</b><br>
-        - <b>连击系统</b>: 坚持每天打卡，连击数越高，经验金币加成越多 (最高 +50%)。<br>
-        - <b>自动存档</b>: 数据安全存储在系统目录，随意移动程序不丢档。
+        <b>🔥 觉醒系统：</b><br>
+        - <b>连击系统</b>: 坚持每天打卡，连击数越高加成越多。断签会清零！<br>
+        - <b>断电保护卡</b>: 商店提供 🛡️保护卡 购买。漏签时自动消耗，保住连击！<br>
+        - <b>自动存档</b>: 数据安全存储在系统目录，随时随地肝。
         </p>
         """)
         content.setWordWrap(True)
@@ -536,7 +526,6 @@ class AddQuestDialog(QDialog):
         self.difficulty_spin.setValue(2)
         form.addRow("难度 (1-5)", self.difficulty_spin)
         
-        # 频率设置
         freq_group = QGroupBox("重复设置")
         freq_layout = QVBoxLayout(freq_group)
         self.rb_once = QRadioButton("一次性任务")
@@ -621,12 +610,13 @@ class AddQuestDialog(QDialog):
             
         return (name, desc or name, qt, attr, diff, freq, active_days_str)
 
+# --- V3.1+ Update: 商店增加断电保护卡 ---
 class ShopDialog(QDialog):
     def __init__(self, db: DatabaseManager, parent=None):
         super().__init__(parent)
         self.db = db
         self.setWindowTitle("🛒 战利品商店")
-        self.resize(500, 400)
+        self.resize(550, 450)
         self.setStyleSheet(get_stylesheet())
         
         layout = QVBoxLayout(self)
@@ -665,16 +655,58 @@ class ShopDialog(QDialog):
     def _refresh_list(self):
         self.gold_label.setText(f"你的赏金: 🪙 {self.db.get_player().gold}")
         rewards = self.db.list_rewards()
-        self.table.setRowCount(len(rewards))
+        
+        # 行为+1: 留给系统固定商品(保护卡)
+        self.table.setRowCount(len(rewards) + 1)
+        
+        # 写入系统固定商品
+        self.table.setItem(0, 0, QTableWidgetItem("🛡️ 连击断电保护卡 (防止漏签断连)"))
+        cost_item = QTableWidgetItem("🪙 500")
+        cost_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.table.setItem(0, 1, cost_item)
+        buy_freeze_btn = QPushButton("购买")
+        buy_freeze_btn.setStyleSheet("color: #79c0ff; border-color: #79c0ff;")
+        buy_freeze_btn.clicked.connect(self._buy_freeze_card)
+        
+        btn_widget_f = QWidget()
+        btn_layout_f = QHBoxLayout(btn_widget_f)
+        btn_layout_f.setContentsMargins(0,0,0,0)
+        btn_layout_f.addWidget(buy_freeze_btn)
+        self.table.setCellWidget(0, 2, btn_widget_f)
+
+        # 写入用户自定商品
         for i, r in enumerate(rewards):
-            self.table.setItem(i, 0, QTableWidgetItem(r.name))
-            cost_item = QTableWidgetItem(f"🪙 {r.cost}"); cost_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table.setItem(i, 1, cost_item)
-            buy_btn = QPushButton("购买"); buy_btn.setProperty("rid", r.id); buy_btn.clicked.connect(self._buy_item)
-            del_btn = QPushButton("❌"); del_btn.setFixedSize(30, 30); del_btn.setStyleSheet("color: red; border: none;"); del_btn.setProperty("rid", r.id); del_btn.clicked.connect(self._del_item)
-            btn_widget = QWidget(); btn_layout = QHBoxLayout(btn_widget); btn_layout.setContentsMargins(0,0,0,0)
-            btn_layout.addWidget(buy_btn); btn_layout.addWidget(del_btn)
-            self.table.setCellWidget(i, 2, btn_widget)
+            row = i + 1
+            self.table.setItem(row, 0, QTableWidgetItem(r.name))
+            cost_item = QTableWidgetItem(f"🪙 {r.cost}")
+            cost_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.setItem(row, 1, cost_item)
+            
+            buy_btn = QPushButton("购买")
+            buy_btn.setProperty("rid", r.id)
+            buy_btn.clicked.connect(self._buy_item)
+            
+            del_btn = QPushButton("❌")
+            del_btn.setFixedSize(30, 30)
+            del_btn.setStyleSheet("color: red; border: none;")
+            del_btn.setProperty("rid", r.id)
+            del_btn.clicked.connect(self._del_item)
+            
+            btn_widget = QWidget()
+            btn_layout = QHBoxLayout(btn_widget)
+            btn_layout.setContentsMargins(0,0,0,0)
+            btn_layout.addWidget(buy_btn)
+            btn_layout.addWidget(del_btn)
+            self.table.setCellWidget(row, 2, btn_widget)
+
+    def _buy_freeze_card(self):
+        success, msg = self.db.buy_freeze_card()
+        if success:
+            QMessageBox.information(self, "购买成功", msg)
+            if self.parent(): self.parent()._refresh_stats()
+        else:
+            QMessageBox.warning(self, "购买失败", msg)
+        self._refresh_list()
 
     def _add_item(self):
         name = self.new_item_name.text().strip()
@@ -727,8 +759,6 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         
-        # V3.1: 初始化时使用 PathManager
-        # 如果不传参数，DatabaseManager 会自动使用系统路径
         self.db = DatabaseManager() 
         self.db.create_tables()
         self.db.init_player_if_missing()
@@ -773,9 +803,12 @@ class MainWindow(QMainWindow):
         self.xp_bar = QProgressBar(); self.xp_bar.setObjectName("playerBar"); self.xp_bar.setFormat("你的进度: %v / %m")
         self.gold_label = QLabel("🪙 0"); self.gold_label.setObjectName("goldLabel")
         
-        # V3.1: 连击显示
         self.streak_label = QLabel("🔥 0 天")
         self.streak_label.setStyleSheet("color: #8b949e; font-weight: bold; font-size: 14px; border: 1px solid #30363d; border-radius: 4px; padding: 2px 6px;")
+        
+        # V3.1+ 断电保护卡展示
+        self.freeze_card_label = QLabel("🛡️ 0")
+        self.freeze_card_label.setStyleSheet("color: #79c0ff; font-weight: bold; font-size: 14px; border: 1px solid #30363d; border-radius: 4px; padding: 2px 6px;")
         
         self.focus_label = QLabel("⏳ 今日专注: 0m")
         self.focus_label.setStyleSheet("color: #79c0ff; font-weight: bold;")
@@ -783,7 +816,8 @@ class MainWindow(QMainWindow):
         p_layout.addWidget(self.level_label)
         p_layout.addWidget(self.xp_bar, 1)
         p_layout.addWidget(self.gold_label)
-        p_layout.addWidget(self.streak_label) # Add Streak
+        p_layout.addWidget(self.streak_label)
+        p_layout.addWidget(self.freeze_card_label) # Add freeze card label
         p_layout.addWidget(self.focus_label)
         status_layout.addLayout(p_layout)
 
@@ -836,7 +870,6 @@ class MainWindow(QMainWindow):
         self._quest_checkboxes = {}
         self._refresh_ui()
 
-        # Check for Tutorial (V3.1 Feature)
         self._check_new_user()
 
         # Timers
@@ -849,7 +882,6 @@ class MainWindow(QMainWindow):
         self.rival_grow_timer.start(600000) 
 
     def _check_new_user(self):
-        """V3.1: 如果是全新用户（Lv1且无经验无任务），弹出新手引导"""
         p = self.db.get_player()
         quests_count = len(self.db.list_quests(None))
         if p.level == 1 and p.xp == 0 and quests_count == 0:
@@ -908,9 +940,13 @@ class MainWindow(QMainWindow):
         self.xp_bar.setMaximum(p.next_level_xp); self.xp_bar.setValue(p.xp)
         self.gold_label.setText(f"🪙 {p.gold}")
         
-        # V3.1: 更新连击UI
+        # 更新连击与保护卡
         streak = getattr(p, "streak_days", 0)
+        freeze_cards = getattr(p, "streak_freeze_cards", 0)
+        
         self.streak_label.setText(f"🔥 连击: {streak}天")
+        self.freeze_card_label.setText(f"🛡️ {freeze_cards}")
+        
         if streak >= 3:
              self.streak_label.setStyleSheet("color: #ff9b5e; font-weight: bold; font-size: 14px; background: #3d1f14; border: 1px solid #ff9b5e; border-radius: 4px; padding: 2px 6px;")
         elif streak >= 1:
@@ -989,12 +1025,19 @@ class MainWindow(QMainWindow):
         pos = self.get_center_pos() 
         player_before = self.db.get_player()
         
-        # V3.1 Update: 接收 4 个返回值 (新增 is_level_up)
-        p_after, gained_xp, gained_gold, is_level_up = self.db.complete_quest(q.id, duration_mins=duration)
+        # 接收新增返回值 cards_used
+        p_after, gained_xp, gained_gold, is_level_up, cards_used = self.db.complete_quest(q.id, duration_mins=duration)
         
         if not p_after:
             sender.setCheckState(Qt.CheckState.Unchecked)
             return
+
+        # 如果消耗了保护卡，给出弹窗提示
+        if cards_used > 0:
+            QMessageBox.information(
+                self, "🛡️ 断电保护生效", 
+                f"检测到你漏签了 {cards_used} 天！\n已自动消耗 {cards_used} 张断电保护卡，连击得以延续！\n\n火种未灭，继续前行！"
+            )
             
         if q.difficulty >= 4 or q.quest_type == QuestType.MAIN:
             self.sfx.play("crit")
@@ -1005,10 +1048,8 @@ class MainWindow(QMainWindow):
             
         FloatingText(f"✨ +{gained_xp} XP | 🪙 +{gained_gold}", pos, self, "lime", font_size=24)
         
-        # 播放升级动画
         self._play_xp_animation(player_before, p_after)
         
-        # V3.1: 弹出升级窗口
         if is_level_up:
             LevelUpDialog(p_after.level, self).exec()
             
@@ -1070,7 +1111,6 @@ def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     
-    # V3.1: 设置全局任务栏图标
     set_app_icon(app, "app.ico")
     
     win = MainWindow()

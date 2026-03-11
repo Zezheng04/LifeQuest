@@ -74,6 +74,12 @@ class DatabaseManager:
                 try: conn.execute("ALTER TABLE player ADD COLUMN last_active_date TEXT DEFAULT ''")
                 except: pass
 
+            # V3.1+ 新增：断电保护卡字段
+            try: conn.execute("SELECT streak_freeze_cards FROM player LIMIT 1")
+            except:
+                try: conn.execute("ALTER TABLE player ADD COLUMN streak_freeze_cards INTEGER DEFAULT 0")
+                except: pass
+
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS reward (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -95,7 +101,8 @@ class DatabaseManager:
                     logic REAL NOT NULL DEFAULT 5.0, 
                     charisma REAL NOT NULL DEFAULT 5.0,
                     streak_days INTEGER DEFAULT 0,
-                    last_active_date TEXT DEFAULT ''
+                    last_active_date TEXT DEFAULT '',
+                    streak_freeze_cards INTEGER DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS rival (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -156,8 +163,8 @@ class DatabaseManager:
         with self.get_connection() as conn:
             if conn.execute("SELECT 1 FROM player WHERE id = 1").fetchone() is None:
                 conn.execute(
-                    """INSERT INTO player (id, level, xp, next_level_xp, gold, perception, insight, logic, charisma, streak_days, last_active_date)
-                       VALUES (1, 1, 0, ?, 0, 5.0, 5.0, 5.0, 5.0, 0, '')""", (calc_next_level_xp(1),)
+                    """INSERT INTO player (id, level, xp, next_level_xp, gold, perception, insight, logic, charisma, streak_days, last_active_date, streak_freeze_cards)
+                       VALUES (1, 1, 0, ?, 0, 5.0, 5.0, 5.0, 5.0, 0, '', 0)""", (calc_next_level_xp(1),)
                 )
             
             now = datetime.now()
@@ -218,14 +225,12 @@ class DatabaseManager:
         self.update_rival(r)
         return leveled, xp_gain
 
-    # --- 修复核心：确保提取 Player 数据时保留连击字段 ---
     def get_player(self) -> Optional[Player]:
         with self.get_connection() as conn:
             row = conn.execute("SELECT * FROM player WHERE id = 1").fetchone()
             if not row: return None
             
             p_data = dict(row)
-            # 无论 models.py 有没有定义这两个字段，我们都手动构建 Player 并强行挂载
             p = Player(
                 id=p_data['id'], level=p_data['level'], xp=p_data['xp'],
                 next_level_xp=p_data['next_level_xp'], gold=p_data['gold'],
@@ -233,22 +238,23 @@ class DatabaseManager:
                 logic=p_data['logic'], charisma=p_data['charisma']
             )
             
-            # 强行将连击天数和活跃日期塞进对象，防止数据丢失
             setattr(p, "streak_days", p_data.get("streak_days", 0))
             setattr(p, "last_active_date", p_data.get("last_active_date", ""))
+            setattr(p, "streak_freeze_cards", p_data.get("streak_freeze_cards", 0))
             return p
 
     def update_player(self, p: Player) -> None:
         s_days = getattr(p, "streak_days", 0)
         l_date = getattr(p, "last_active_date", "")
+        f_cards = getattr(p, "streak_freeze_cards", 0)
         
         with self.get_connection() as conn:
             conn.execute(
                 """UPDATE player SET level=?, xp=?, next_level_xp=?, gold=?,
-                   perception=?, insight=?, logic=?, charisma=?, streak_days=?, last_active_date=?
+                   perception=?, insight=?, logic=?, charisma=?, streak_days=?, last_active_date=?, streak_freeze_cards=?
                    WHERE id = 1""",
                 (p.level, p.xp, p.next_level_xp, p.gold, p.perception, p.insight, 
-                 p.logic, p.charisma, s_days, l_date)
+                 p.logic, p.charisma, s_days, l_date, f_cards)
             )
 
     def get_rival(self) -> Optional[Rival]:
@@ -332,30 +338,57 @@ class DatabaseManager:
             self.update_player(p)
             return True, f"购买成功：{r_row['name']}"
 
-    def complete_quest(self, quest_id: int, duration_mins: int = 0) -> Tuple[Optional[Player], int, int, bool]:
+    # 新增：购买断电保护卡
+    def buy_freeze_card(self) -> Tuple[bool, str]:
+        with self.get_connection() as conn:
+            p = self.get_player()
+            if p.gold < 500: return False, "金币不足，购买保护卡需要 500 🪙"
+            p.gold -= 500
+            cards = getattr(p, "streak_freeze_cards", 0)
+            setattr(p, "streak_freeze_cards", cards + 1)
+            self.update_player(p)
+            return True, "购买成功：🛡️ 连击断电保护卡 +1"
+
+    def complete_quest(self, quest_id: int, duration_mins: int = 0) -> Tuple[Optional[Player], int, int, bool, int]:
+        """ 返回：(玩家对象, 获得XP, 获得金币, 是否升级, 消耗的断电保护卡数量) """
         quest = self.get_quest(quest_id)
-        if not quest or quest.status == QuestStatus.COMPLETE: return None, 0, 0, False
+        if not quest or quest.status == QuestStatus.COMPLETE: return None, 0, 0, False, 0
         
         player = self.get_player()
         
-        # --- 连击逻辑 ---
-        today_str = datetime.now().strftime("%Y-%m-%d")
-        yesterday_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        today_date = datetime.now()
+        today_str = today_date.strftime("%Y-%m-%d")
         
         current_streak = getattr(player, "streak_days", 0)
         last_active = getattr(player, "last_active_date", "")
+        freeze_cards = getattr(player, "streak_freeze_cards", 0)
         
-        # 只有在今天第一次完成任务时，才去判定连击
+        cards_used = 0
+
+        # --- 包含保护卡机制的连击判定 ---
         if last_active != today_str:
-            if last_active == yesterday_str:
-                current_streak += 1 # 连续打卡，+1
+            if last_active:
+                last_date = datetime.strptime(last_active, "%Y-%m-%d")
+                days_diff = (today_date.date() - last_date.date()).days
+                
+                if days_diff == 1:
+                    current_streak += 1 # 正常连击
+                elif days_diff > 1:
+                    missed_days = days_diff - 1
+                    # 检查是否有足够的断电保护卡来填补空缺
+                    if freeze_cards >= missed_days:
+                        freeze_cards -= missed_days
+                        cards_used = missed_days
+                        current_streak += 1 # 消耗卡片，连击得以延续！
+                        setattr(player, "streak_freeze_cards", freeze_cards)
+                    else:
+                        current_streak = 1 # 卡片不够，无情重置
             else:
-                current_streak = 1 # 隔天了，断签，变回1
+                current_streak = 1
             
             setattr(player, "streak_days", current_streak)
             setattr(player, "last_active_date", today_str)
 
-        # 连击加成上限 50%
         bonus_ratio = min(0.5, getattr(player, "streak_days", 0) * 0.01)
         base_xp = 20 + quest.difficulty * 15
         base_gold = 10 + quest.difficulty * 5
@@ -387,7 +420,7 @@ class DatabaseManager:
             conn.execute("UPDATE quest SET status = ?, completed_at = ?, duration = ? WHERE id = ?", 
                 (QuestStatus.COMPLETE.value, now_str, duration_mins, quest_id))
             
-        return player, xp_gain, gold_gain, leveled_up
+        return player, xp_gain, gold_gain, leveled_up, cards_used
 
     def abandon_quest(self, quest_id: int) -> Tuple[int, int]:
         quest = self.get_quest(quest_id)
