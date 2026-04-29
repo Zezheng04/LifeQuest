@@ -16,6 +16,7 @@ lifequest.db
 config.json
 lifequest_backup_*.json
 进度备忘录.txt
+进度记录.txt
 
 # --- 打包生成文件 (不要传 exe) ---
 build/
