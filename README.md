@@ -76,3 +76,43 @@ LifeQuest 现已打包为单文件程序，无需安装 Python。
 3. 找到你旧版本文件夹里的 `lifequest.db`（存档）和 `config.json`（配置）。
 4. 将旧文件**复制并粘贴**到第 2 步打开的文件夹中，覆盖新文件。
 5. 重启软件，你的等级、金币和宿敌就全部回来了！
+
+V4.0新增：
+
+## ☁️ 云端账号模式 (Cloud Mode)
+
+项目现在提供了基于 `FastAPI + JWT` 的账号登录与云端同步骨架，适合从单机版平滑升级到毕设所需的服务端架构。
+
+### 1. 启动后端
+
+1. 安装后端依赖：
+   `pip install -r backend/requirements.txt`
+2. 启动服务：
+   `python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload`
+
+默认会使用本地 `SQLite` 文件 `backend/lifequest_cloud.db` 进行开发测试。部署到服务器时，可以通过环境变量 `DATABASE_URL` 切换到 MySQL，例如：
+
+`mysql+pymysql://root:password@127.0.0.1:3306/lifequest_db`
+
+### 2. 启动客户端
+
+1. 安装客户端依赖：
+   `pip install -r requirements.txt`
+2. 运行：
+   `python main_gui.py`
+
+客户端启动后会先弹出登录窗口：
+
+- 选择 `登录云端`：使用账号连接 FastAPI 服务
+- 选择 `注册并登录`：创建新账号并直接进入云端
+- 选择 `继续单机版`：保留原本本地 SQLite 模式
+
+### 3. 本地数据迁移
+
+如果你这台电脑已有单机版进度，而云端账号还是空白状态，登录成功后客户端会提示是否一键迁移本地数据。迁移内容包括：
+
+- 玩家等级、金币、四维属性、连击、保护卡
+- 宿敌数据
+- 任务列表与历史状态
+- 奖励商店
+- 目标名称、目标日期、属性名称配置

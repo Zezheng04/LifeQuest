@@ -1,0 +1,26 @@
+如何打包？
+pyinstaller -F -w -i "app.ico" -n "lifequest_v4" main_gui.py
+
+如何启动运行？
+- 后端： pip install -r backend/requirements.txt
+- 启动：python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
+- 客户端： pip install -r requirements.txt 后运行 python main_gui.py
+
+
+如果你第二台电脑登录框里填的是 http://127.0.0.1:8000 ，那它连的是“它自己那台电脑”的本地服务，不是你第一台电脑。
+
+所以双端测试要么这样做：
+
+- 方案 A：一台电脑当服务器，在局域网里给另一台电脑用
+- 方案 B：把 FastAPI 部署到云服务器，两台电脑都连公网地址
+如果先在宿舍/家里局域网测试，操作是这样
+
+假设电脑 A 跑后端，电脑 B 测登录：
+
+1. 在电脑 A 启动后端时不要绑 127.0.0.1 ，改成：
+```
+python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+```
+2. 在电脑 A 里运行 ipconfig ，找到局域网 IPv4，192.168.0.17
+3. 放行 Windows 防火墙 8000 端口，或者首次弹窗时允许访问
+4. 在电脑 B 的登录框里填： http://192.168.0.17:8000

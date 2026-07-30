@@ -1,0 +1,1 @@
+"""LifeQuest FastAPI backend package."""

@@ -1,4 +1,4 @@
-﻿"""
+"""
 LifeQuest V3.1 - 觉醒版 (Awakening)
 GUI Client
 """
@@ -30,18 +30,28 @@ from PyQt6.QtMultimedia import QSoundEffect
 
 from database import DatabaseManager
 from models import Player, Rival, Quest, QuestStatus, QuestType, QuestAttribute, RivalTier, QuestFrequency
+from remote_database import (
+    RemoteApiError,
+    RemoteDatabaseManager,
+    build_sync_state,
+    login_user,
+    register_user,
+)
 
 CONFIG_FILE = PathManager.get_config_path()
 
-def load_config():
-    default_config = {
-        "target_name": "雅思 8.0 竞速对决", 
+def get_default_config():
+    return {
+        "target_name": "雅思 8.0 竞速对决",
         "target_date": "2024-12-31",
         "attr1": "听力(感知)",
         "attr2": "阅读(洞察)",
         "attr3": "写作(逻辑)",
         "attr4": "口语(魅力)"
     }
+
+def load_config():
+    default_config = get_default_config()
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -58,6 +68,23 @@ def save_config(data):
     os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
+
+def has_local_progress(local_db: DatabaseManager, config: dict) -> bool:
+    player = local_db.get_player()
+    quests = local_db.list_quests(status=None)
+    rewards = local_db.list_rewards()
+    default_config = get_default_config()
+
+    return any([
+        player.level != 1,
+        player.xp != 0,
+        player.gold != 0,
+        getattr(player, "streak_days", 0) != 0,
+        getattr(player, "streak_freeze_cards", 0) != 0,
+        bool(quests),
+        bool(rewards),
+        config != default_config,
+    ])
 
 class SoundManager:
     def __init__(self):
@@ -755,15 +782,136 @@ class CompleteQuestDialog(QDialog):
         layout.addWidget(btns)
     def get_duration(self): return self.time_spin.value()
 
+class LoginDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("LifeQuest 云端登录")
+        self.setStyleSheet(get_stylesheet())
+        self.resize(420, 250)
+
+        self.mode = "local"
+        self.db_manager = None
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        title = QLabel("先登录账号，再进入云端人生计划")
+        title.setStyleSheet("font-size: 16px; font-weight: bold; color: #7ee787;")
+        layout.addWidget(title)
+
+        hint = QLabel("默认地址适用于本机 FastAPI 服务。没有启动服务器时，你也可以先继续使用单机版。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #8b949e;")
+        layout.addWidget(hint)
+
+        form = QFormLayout()
+        self.url_edit = QLineEdit("http://127.0.0.1:8000")
+        self.user_edit = QLineEdit()
+        self.user_edit.setPlaceholderText("请输入账号")
+        self.password_edit = QLineEdit()
+        self.password_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.password_edit.setPlaceholderText("请输入密码")
+        form.addRow("服务器地址", self.url_edit)
+        form.addRow("账号", self.user_edit)
+        form.addRow("密码", self.password_edit)
+        layout.addLayout(form)
+
+        btn_layout = QHBoxLayout()
+        self.login_btn = QPushButton("登录云端")
+        self.register_btn = QPushButton("注册并登录")
+        self.local_btn = QPushButton("继续单机版")
+        cancel_btn = QPushButton("取消")
+        self.login_btn.clicked.connect(self._login)
+        self.register_btn.clicked.connect(self._register)
+        self.local_btn.clicked.connect(self._use_local_mode)
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(self.login_btn)
+        btn_layout.addWidget(self.register_btn)
+        btn_layout.addWidget(self.local_btn)
+        btn_layout.addWidget(cancel_btn)
+        layout.addLayout(btn_layout)
+
+    def _validate_inputs(self):
+        base_url = self.url_edit.text().strip()
+        username = self.user_edit.text().strip()
+        password = self.password_edit.text()
+        if not base_url or not username or not password:
+            QMessageBox.warning(self, "信息不完整", "服务器地址、账号和密码都需要填写。")
+            return None, None, None
+        return base_url, username, password
+
+    def _login(self):
+        base_url, username, password = self._validate_inputs()
+        if not base_url:
+            return
+        try:
+            token = login_user(base_url, username, password)
+            manager = RemoteDatabaseManager(base_url, token)
+            manager.init_player_if_missing()
+        except RemoteApiError as exc:
+            QMessageBox.critical(self, "登录失败", str(exc))
+            return
+
+        self.mode = "remote"
+        self.db_manager = manager
+        self.accept()
+
+    def _register(self):
+        base_url, username, password = self._validate_inputs()
+        if not base_url:
+            return
+        try:
+            register_user(base_url, username, password)
+        except RemoteApiError as exc:
+            QMessageBox.critical(self, "注册失败", str(exc))
+            return
+        self._login()
+
+    def _use_local_mode(self):
+        self.mode = "local"
+        self.accept()
+
+def maybe_migrate_local_progress(remote_db: RemoteDatabaseManager, local_db: DatabaseManager, local_config: dict, parent=None):
+    if not has_local_progress(local_db, local_config):
+        return
+
+    try:
+        if not remote_db.is_fresh_account():
+            return
+    except RemoteApiError as exc:
+        QMessageBox.warning(parent, "迁移检查失败", f"已登录成功，但无法判断账号是否为空白状态：\n{exc}")
+        return
+
+    reply = QMessageBox.question(
+        parent,
+        "发现本地存档",
+        "检测到你当前电脑里已经有单机版进度。\n\n是否把本地任务、属性、商店、宿敌和目标配置一键迁移到当前云端账号？",
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        QMessageBox.StandardButton.Yes,
+    )
+    if reply != QMessageBox.StandardButton.Yes:
+        return
+
+    try:
+        remote_db.import_state(build_sync_state(local_db, local_config))
+        QMessageBox.information(parent, "迁移完成", "本地单机版数据已经同步到当前账号。")
+    except RemoteApiError as exc:
+        QMessageBox.critical(parent, "迁移失败", str(exc))
+
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, db_manager=None, initial_config=None):
         super().__init__()
         
-        self.db = DatabaseManager() 
+        self.db = db_manager or DatabaseManager()
         self.db.create_tables()
         self.db.init_player_if_missing()
         
-        self.config = load_config()
+        if initial_config is not None:
+            self.config = initial_config
+        elif hasattr(self.db, "get_user_config"):
+            self.config = self.db.get_user_config()
+        else:
+            self.config = load_config()
         self.sfx = SoundManager()
 
         self._animator: Optional[ProgressBarAnimator] = None
@@ -881,42 +1029,60 @@ class MainWindow(QMainWindow):
         self.rival_grow_timer.timeout.connect(self._on_rival_timer)
         self.rival_grow_timer.start(600000) 
 
+    def _show_sync_error(self, exc: Exception):
+        QMessageBox.critical(self, "云端同步失败", str(exc))
+
     def _check_new_user(self):
-        p = self.db.get_player()
-        quests_count = len(self.db.list_quests(None))
-        if p.level == 1 and p.xp == 0 and quests_count == 0:
-            QTimer.singleShot(500, lambda: TutorialDialog(self).exec())
+        try:
+            p = self.db.get_player()
+            quests_count = len(self.db.list_quests(None))
+            if p.level == 1 and p.xp == 0 and quests_count == 0:
+                QTimer.singleShot(500, lambda: TutorialDialog(self).exec())
+        except RemoteApiError as exc:
+            self._show_sync_error(exc)
 
     def _check_date_change(self):
-        now_str = datetime.now().strftime("%Y-%m-%d")
-        if now_str != self._current_date_str:
-            self._current_date_str = now_str
-            self.db.check_daily_reset()
-            self._refresh_ui()
-            FloatingText("📅 新的一天开始了！", self.get_center_pos(), self, "cyan", 28)
+        try:
+            now_str = datetime.now().strftime("%Y-%m-%d")
+            if now_str != self._current_date_str:
+                self._current_date_str = now_str
+                self.db.check_daily_reset()
+                self._refresh_ui()
+                FloatingText("📅 新的一天开始了！", self.get_center_pos(), self, "cyan", 28)
+        except RemoteApiError as exc:
+            self._show_sync_error(exc)
 
     def _on_rival_timer(self):
-        leveled_up, xp_gained = self.db.rival_random_growth()
-        if xp_gained > 0:
-            self._refresh_stats()
-            if leveled_up:
-                r = self.db.get_rival()
-                FloatingText(f"😈 宿敌升级了! Lv.{r.level}", self.get_center_pos() + QPoint(0, -50), self, "#f85149", 24)
+        try:
+            leveled_up, xp_gained = self.db.rival_random_growth()
+            if xp_gained > 0:
+                self._refresh_stats()
+                if leveled_up:
+                    r = self.db.get_rival()
+                    FloatingText(f"😈 宿敌升级了! Lv.{r.level}", self.get_center_pos() + QPoint(0, -50), self, "#f85149", 24)
+        except RemoteApiError as exc:
+            self._show_sync_error(exc)
 
     def _open_settings(self):
-        dialog = TargetSettingsDialog(self.config, self)
-        rival = self.db.get_rival()
-        if rival: dialog.set_current_tier(rival.tier)
+        try:
+            dialog = TargetSettingsDialog(self.config, self)
+            rival = self.db.get_rival()
+            if rival: dialog.set_current_tier(rival.tier)
 
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            new_data = dialog.get_data()
-            new_tier = new_data.pop("rival_tier", RivalTier.NORMAL.value)
-            if rival:
-                rival.tier = new_tier
-                self.db.update_rival(rival)
-            self.config.update(new_data)
-            save_config(self.config)
-            self._refresh_ui()
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                new_data = dialog.get_data()
+                new_tier = new_data.pop("rival_tier", RivalTier.NORMAL.value)
+                if rival:
+                    rival.tier = new_tier
+                    self.db.update_rival(rival)
+                self.config.update(new_data)
+                if hasattr(self.db, "update_user_config"):
+                    self.db.update_user_config(self.config)
+                else:
+                    save_config(self.config)
+                self._refresh_ui()
+        except RemoteApiError as exc:
+            self._show_sync_error(exc)
 
     def _refresh_target_ui(self):
         self.target_title_label.setText(f"🏁 {self.config['target_name']}")
@@ -929,9 +1095,12 @@ class MainWindow(QMainWindow):
             self.countdown_label.setText("日期格式错误")
 
     def _refresh_ui(self) -> None:
-        self._refresh_target_ui()
-        self._refresh_stats()
-        self._refresh_quest_list()
+        try:
+            self._refresh_target_ui()
+            self._refresh_stats()
+            self._refresh_quest_list()
+        except RemoteApiError as exc:
+            self._show_sync_error(exc)
 
     def _refresh_stats(self) -> None:
         p = self.db.get_player(); r = self.db.get_rival()
@@ -1013,47 +1182,52 @@ class MainWindow(QMainWindow):
     def _on_quest_toggled(self, state: int) -> None:
         if state != Qt.CheckState.Checked.value: return
         sender = self.sender(); q = sender.property("quest")
-        
-        dlg = CompleteQuestDialog(q.name, self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
+        try:
+            dlg = CompleteQuestDialog(q.name, self)
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                sender.blockSignals(True)
+                sender.setCheckState(Qt.CheckState.Unchecked)
+                sender.blockSignals(False)
+                return
+            duration = dlg.get_duration()
+
+            pos = self.get_center_pos()
+            player_before = self.db.get_player()
+
+            # 接收新增返回值 cards_used
+            p_after, gained_xp, gained_gold, is_level_up, cards_used = self.db.complete_quest(q.id, duration_mins=duration)
+
+            if not p_after:
+                sender.setCheckState(Qt.CheckState.Unchecked)
+                return
+
+            # 如果消耗了保护卡，给出弹窗提示
+            if cards_used > 0:
+                QMessageBox.information(
+                    self, "🛡️ 断电保护生效",
+                    f"检测到你漏签了 {cards_used} 天！\n已自动消耗 {cards_used} 张断电保护卡，连击得以延续！\n\n火种未灭，继续前行！"
+                )
+
+            if q.difficulty >= 4 or q.quest_type == QuestType.MAIN:
+                self.sfx.play("crit")
+                self.shake_window()
+                FloatingText("💥 暴击成长！", pos + QPoint(0, 30), self, "#f0d84a", font_size=28)
+            else:
+                self.sfx.play("success")
+
+            FloatingText(f"✨ +{gained_xp} XP | 🪙 +{gained_gold}", pos, self, "lime", font_size=24)
+
+            self._play_xp_animation(player_before, p_after)
+
+            if is_level_up:
+                LevelUpDialog(p_after.level, self).exec()
+
+            self._refresh_ui()
+        except RemoteApiError as exc:
             sender.blockSignals(True)
             sender.setCheckState(Qt.CheckState.Unchecked)
             sender.blockSignals(False)
-            return
-        duration = dlg.get_duration()
-
-        pos = self.get_center_pos() 
-        player_before = self.db.get_player()
-        
-        # 接收新增返回值 cards_used
-        p_after, gained_xp, gained_gold, is_level_up, cards_used = self.db.complete_quest(q.id, duration_mins=duration)
-        
-        if not p_after:
-            sender.setCheckState(Qt.CheckState.Unchecked)
-            return
-
-        # 如果消耗了保护卡，给出弹窗提示
-        if cards_used > 0:
-            QMessageBox.information(
-                self, "🛡️ 断电保护生效", 
-                f"检测到你漏签了 {cards_used} 天！\n已自动消耗 {cards_used} 张断电保护卡，连击得以延续！\n\n火种未灭，继续前行！"
-            )
-            
-        if q.difficulty >= 4 or q.quest_type == QuestType.MAIN:
-            self.sfx.play("crit")
-            self.shake_window()
-            FloatingText("💥 暴击成长！", pos + QPoint(0, 30), self, "#f0d84a", font_size=28)
-        else:
-            self.sfx.play("success")
-            
-        FloatingText(f"✨ +{gained_xp} XP | 🪙 +{gained_gold}", pos, self, "lime", font_size=24)
-        
-        self._play_xp_animation(player_before, p_after)
-        
-        if is_level_up:
-            LevelUpDialog(p_after.level, self).exec()
-            
-        self._refresh_ui()
+            self._show_sync_error(exc)
 
     def _play_xp_animation(self, before: Player, after: Player) -> None:
         if self._anim_group and self._anim_group.state() == QPropertyAnimation.State.Running:
@@ -1072,40 +1246,49 @@ class MainWindow(QMainWindow):
         self._anim_group = group; group.start()
 
     def _on_add_quest(self) -> None:
-        dialog = AddQuestDialog(self.config, self)
-        if dialog.exec() != QDialog.DialogCode.Accepted: return
-        data = dialog.get_quest_data()
-        if not data: return
-        name, desc, qt, attr, diff, freq, active_days = data
-        q = Quest(name=name, description=desc, quest_type=qt, attribute=attr, difficulty=diff, frequency=freq, active_days=active_days)
-        self.db.insert_quest(q)
-        self._refresh_quest_list()
+        try:
+            dialog = AddQuestDialog(self.config, self)
+            if dialog.exec() != QDialog.DialogCode.Accepted: return
+            data = dialog.get_quest_data()
+            if not data: return
+            name, desc, qt, attr, diff, freq, active_days = data
+            q = Quest(name=name, description=desc, quest_type=qt, attribute=attr, difficulty=diff, frequency=freq, active_days=active_days)
+            self.db.insert_quest(q)
+            self._refresh_quest_list()
+        except RemoteApiError as exc:
+            self._show_sync_error(exc)
 
     def _on_edit_quest(self) -> None:
-        q = self.sender().property("quest")
-        dialog = AddQuestDialog(self.config, self, quest_to_edit=q)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            data = dialog.get_quest_data()
-            if data:
-                q.name, q.description, q.quest_type, q.attribute, q.difficulty, q.frequency, q.active_days = data
-                self.db.update_quest(q)
-                self._refresh_quest_list()
+        try:
+            q = self.sender().property("quest")
+            dialog = AddQuestDialog(self.config, self, quest_to_edit=q)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                data = dialog.get_quest_data()
+                if data:
+                    q.name, q.description, q.quest_type, q.attribute, q.difficulty, q.frequency, q.active_days = data
+                    self.db.update_quest(q)
+                    self._refresh_quest_list()
+        except RemoteApiError as exc:
+            self._show_sync_error(exc)
 
     def _on_abandon_quest(self) -> None:
-        q = self.sender().property("quest")
-        pos = self.get_center_pos()
-        penalty_gold = q.difficulty * 5
-        rival_gain = q.difficulty * 10
-        reply = QMessageBox.warning(
-            self, "⚠️ 严重警告",
-            f"确认放弃任务【{q.name}】？\n\n💸 违约惩罚: 扣除 {penalty_gold} 金币\n😈 致命打击: 你的影子对手将趁机白嫖 {rival_gain} 点经验！",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No
-        )
-        if reply == QMessageBox.StandardButton.Yes:
-            self.db.abandon_quest(q.id)
-            self.sfx.play("fail")
-            FloatingText(f"💔 -{penalty_gold} 金币 | 😈 对手 +{rival_gain} XP", pos, self, "#f85149", font_size=24)
-            self._refresh_ui()
+        try:
+            q = self.sender().property("quest")
+            pos = self.get_center_pos()
+            penalty_gold = q.difficulty * 5
+            rival_gain = q.difficulty * 10
+            reply = QMessageBox.warning(
+                self, "⚠️ 严重警告",
+                f"确认放弃任务【{q.name}】？\n\n💸 违约惩罚: 扣除 {penalty_gold} 金币\n😈 致命打击: 你的影子对手将趁机白嫖 {rival_gain} 点经验！",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self.db.abandon_quest(q.id)
+                self.sfx.play("fail")
+                FloatingText(f"💔 -{penalty_gold} 金币 | 😈 对手 +{rival_gain} XP", pos, self, "#f85149", font_size=24)
+                self._refresh_ui()
+        except RemoteApiError as exc:
+            self._show_sync_error(exc)
 
 def main():
     app = QApplication(sys.argv)
@@ -1113,7 +1296,28 @@ def main():
     
     set_app_icon(app, "app.ico")
     
-    win = MainWindow()
+    local_db = DatabaseManager()
+    local_db.create_tables()
+    local_db.init_player_if_missing()
+    local_config = load_config()
+
+    login_dialog = LoginDialog()
+    if login_dialog.exec() != QDialog.DialogCode.Accepted:
+        return
+
+    if login_dialog.mode == "remote":
+        maybe_migrate_local_progress(login_dialog.db_manager, local_db, local_config)
+        try:
+            initial_config = login_dialog.db_manager.get_user_config()
+        except RemoteApiError as exc:
+            QMessageBox.critical(None, "读取云端配置失败", str(exc))
+            return
+        db_manager = login_dialog.db_manager
+    else:
+        db_manager = local_db
+        initial_config = local_config
+
+    win = MainWindow(db_manager=db_manager, initial_config=initial_config)
     win.show()
     sys.exit(app.exec())
 

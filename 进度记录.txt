@@ -1,0 +1,24 @@
+2026/4/29
+今天我们主要围绕 LifeQuest V4.0 的后端基础设施建设与核心认证系统 开展了工作，将整个后端骨架成功搭建了起来。
+
+具体完成的工作可以总结为以下两部分：
+
+1. Step 1.1: 搭建后端工程与 MySQL 数据库设计
+环境初始化：在本地成功创建了 venv_backend 虚拟环境，并安装了 FastAPI, Uvicorn, SQLAlchemy, PyMySQL 以及 Pydantic 等核心基础库。
+数据库接入：建立了 database.py，配置并跑通了本地 MySQL (lifequest_db) 的数据库连接。
+数据模型设计 (ORM)：在 models.py 中规范设计并自动建表：
+User（用户表）：包含账户、由于安全考虑的哈希密码字段、金币体系、连击数以及四维属性（感知、力量、智力、魅力）。
+Task（任务表）：包含归属用户的外键关联、任务详情、难度分级、状态追踪及循环属性。
+2. Step 1.2: FastAPI 核心应用初始化与 JWT 身份验证体系
+补全依赖：安装了实现安全认证所需的 passlib[bcrypt]（密码哈希）、python-jose（生成解析 JWT）以及表单请求解析库。
+数据校验层：创建了 schemas.py，通过 Pydantic 严格定义了注册体 (UserCreate)、响应格式 (UserResponse) 以及令牌格式 (Token) 等接口进出数据模型。
+API 路由与鉴权逻辑实现：完善了 FastAPI 的核心入口文件 main.py：
+定义了标准的密码加密解密策略与 JWT (基于 HS256) 发放机制。
+开发完成 POST /register：实现基于被加密密码（bcrypt）的新用户安全注册功能，防止明文存储。
+开发完成 POST /login：实现 OAuth2 标准的表单登录，发放长期可用的 JWT Access Token。
+注入依赖 get_current_user：设计了能够全局使用、自动解析用户 Token 获取数据库用户对象的依赖函数，并提供了 /users/me 接口进行测试。
+目前的状态：你的项目已经拥有了完整独立运行的 FastAPI 后端服务设计（目前 Uvicorn 已在运行），并且自带基于 Swagger UI 的接口文档系统，且具备了最高频通用的后端用户体系管理能力。接下来就可以基于这个良好的底座开发针对 Task 表的增删改查（如日常任务同步）等核心游戏化业务逻辑了！
+
+
+26/7/30
+重新开始，之前的多端同步一直有问题。本次新建分支bishe_new,在这上面实现了多端同步功能，经过多端测试成功。
