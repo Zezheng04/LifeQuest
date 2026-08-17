@@ -939,7 +939,9 @@ class MainWindow(QMainWindow):
         self.target_title_label.setStyleSheet("color: #7ee787; font-size:18px; font-weight:bold;")
         edit_btn = QPushButton("⚙️"); edit_btn.setObjectName("editBtn"); edit_btn.setFixedSize(30, 30)
         edit_btn.clicked.connect(self._open_settings)
-        title_layout.addWidget(self.target_title_label); title_layout.addWidget(edit_btn); title_layout.addStretch()
+        cloud_btn = QPushButton("☁️"); cloud_btn.setObjectName("cloudBtn"); cloud_btn.setFixedSize(30, 30)
+        cloud_btn.clicked.connect(self._open_cloud_sync)
+        title_layout.addWidget(self.target_title_label); title_layout.addWidget(edit_btn); title_layout.addWidget(cloud_btn); title_layout.addStretch()
         self.countdown_label = QLabel("距目标还有: 计算中...")
         self.countdown_label.setStyleSheet("color: #ff7b72; font-size:18px; font-weight:bold;")
         title_layout.addWidget(self.countdown_label)
@@ -965,7 +967,7 @@ class MainWindow(QMainWindow):
         p_layout.addWidget(self.xp_bar, 1)
         p_layout.addWidget(self.gold_label)
         p_layout.addWidget(self.streak_label)
-        p_layout.addWidget(self.freeze_card_label) # Add freeze card label
+        p_layout.addWidget(self.freeze_card_label)
         p_layout.addWidget(self.focus_label)
         status_layout.addLayout(p_layout)
 
@@ -1083,6 +1085,72 @@ class MainWindow(QMainWindow):
                 self._refresh_ui()
         except RemoteApiError as exc:
             self._show_sync_error(exc)
+
+    def _open_cloud_sync(self):
+        if isinstance(self.db, RemoteDatabaseManager):
+            QMessageBox.information(self, "云端同步", "当前已连接云端账号。")
+            return
+
+        dialog = LoginDialog(self)
+        dialog.local_btn.setVisible(False)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        if dialog.mode != "remote":
+            return
+
+        remote_db = dialog.db_manager
+
+        try:
+            fresh = remote_db.is_fresh_account()
+        except RemoteApiError as exc:
+            self._show_sync_error(exc)
+            return
+
+        if fresh:
+            maybe_migrate_local_progress(remote_db, self.db, self.config, self)
+            self._switch_to_remote(remote_db)
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "云端账号已有数据",
+            "当前云端账号已经有存档。\n\n选择【是】= 上传本地覆盖云端\n选择【否】= 仅登录使用云端\n选择【取消】= 放弃本次连接",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.No,
+        )
+
+        if reply == QMessageBox.StandardButton.Cancel:
+            return
+
+        if reply == QMessageBox.StandardButton.Yes:
+            overwrite = QMessageBox.warning(
+                self,
+                "确认覆盖云端",
+                "将用本地存档覆盖云端存档（不可撤销）。\n\n确认继续？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if overwrite != QMessageBox.StandardButton.Yes:
+                return
+            try:
+                remote_db.import_state(build_sync_state(self.db, self.config))
+                QMessageBox.information(self, "同步完成", "本地存档已覆盖上传到云端。")
+            except RemoteApiError as exc:
+                self._show_sync_error(exc)
+                return
+
+        self._switch_to_remote(remote_db)
+
+    def _switch_to_remote(self, remote_db: RemoteDatabaseManager):
+        try:
+            remote_config = remote_db.get_user_config()
+        except RemoteApiError as exc:
+            self._show_sync_error(exc)
+            return
+
+        self.db = remote_db
+        self.config = remote_config
+        self._refresh_ui()
 
     def _refresh_target_ui(self):
         self.target_title_label.setText(f"🏁 {self.config['target_name']}")

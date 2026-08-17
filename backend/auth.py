@@ -15,9 +15,6 @@ SECRET_KEY = os.getenv("LIFEQUEST_SECRET_KEY", "change-this-secret-before-deploy
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "10080"))
 
-# Prefer pbkdf2_sha256 for new passwords to avoid bcrypt backend issues
-# on Windows and the 72-byte bcrypt password ceiling. Keep bcrypt for
-# backward compatibility with any existing accounts.
 pwd_context = CryptContext(schemes=["pbkdf2_sha256", "bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token")
 
