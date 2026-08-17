@@ -871,6 +871,46 @@ class LoginDialog(QDialog):
         self.mode = "local"
         self.accept()
 
+class CloudConflictDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("云端与本地冲突")
+        self.setStyleSheet(get_stylesheet())
+        self.resize(520, 260)
+
+        self.choice = "cancel"
+
+        layout = QVBoxLayout(self)
+        title = QLabel("云端账号已有存档，选择同步策略：")
+        title.setStyleSheet("font-size: 15px; font-weight: bold; color: #7ee787;")
+        layout.addWidget(title)
+
+        hint = QLabel("下载：用云端覆盖本机（用于离线继续）\n上传：用本机覆盖云端（用于把离线进度推到多端）\n仅云端：本机不改动，直接进入云端模式")
+        hint.setStyleSheet("color: #8b949e;")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        btn_layout = QHBoxLayout()
+        download_btn = QPushButton("⬇️ 下载云端到本机")
+        cloud_btn = QPushButton("☁️ 仅使用云端")
+        upload_btn = QPushButton("⬆️ 上传本机覆盖云端")
+        cancel_btn = QPushButton("取消")
+
+        download_btn.clicked.connect(lambda: self._set_choice("download"))
+        cloud_btn.clicked.connect(lambda: self._set_choice("cloud_only"))
+        upload_btn.clicked.connect(lambda: self._set_choice("upload"))
+        cancel_btn.clicked.connect(self.reject)
+
+        btn_layout.addWidget(download_btn)
+        btn_layout.addWidget(cloud_btn)
+        btn_layout.addWidget(upload_btn)
+        btn_layout.addWidget(cancel_btn)
+        layout.addLayout(btn_layout)
+
+    def _set_choice(self, value: str):
+        self.choice = value
+        self.accept()
+
 def maybe_migrate_local_progress(remote_db: RemoteDatabaseManager, local_db: DatabaseManager, local_config: dict, parent=None):
     if not has_local_progress(local_db, local_config):
         return
@@ -1088,7 +1128,25 @@ class MainWindow(QMainWindow):
 
     def _open_cloud_sync(self):
         if isinstance(self.db, RemoteDatabaseManager):
-            QMessageBox.information(self, "云端同步", "当前已连接云端账号。")
+            reply = QMessageBox.question(
+                self,
+                "云端下载",
+                "当前已连接云端账号。\n\n是否将云端最新存档下载到本机，用于离线继续？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            try:
+                state = self.db.export_state()
+                local_db = DatabaseManager()
+                local_db.create_tables()
+                local_db.init_player_if_missing()
+                local_config = local_db.import_sync_state(state)
+                save_config(local_config)
+                QMessageBox.information(self, "下载完成", "云端存档已保存到本机。现在断网也能用单机版继续。")
+            except RemoteApiError as exc:
+                self._show_sync_error(exc)
             return
 
         dialog = LoginDialog(self)
@@ -1111,18 +1169,11 @@ class MainWindow(QMainWindow):
             self._switch_to_remote(remote_db)
             return
 
-        reply = QMessageBox.question(
-            self,
-            "云端账号已有数据",
-            "当前云端账号已经有存档。\n\n选择【是】= 上传本地覆盖云端\n选择【否】= 仅登录使用云端\n选择【取消】= 放弃本次连接",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.No,
-        )
-
-        if reply == QMessageBox.StandardButton.Cancel:
+        conflict = CloudConflictDialog(self)
+        if conflict.exec() != QDialog.DialogCode.Accepted:
             return
 
-        if reply == QMessageBox.StandardButton.Yes:
+        if conflict.choice == "upload":
             overwrite = QMessageBox.warning(
                 self,
                 "确认覆盖云端",
@@ -1138,8 +1189,33 @@ class MainWindow(QMainWindow):
             except RemoteApiError as exc:
                 self._show_sync_error(exc)
                 return
+            self._switch_to_remote(remote_db)
+            return
 
-        self._switch_to_remote(remote_db)
+        if conflict.choice == "download":
+            overwrite = QMessageBox.warning(
+                self,
+                "确认覆盖本机",
+                "将用云端存档覆盖本机单机版存档（不可撤销）。\n\n确认继续？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if overwrite != QMessageBox.StandardButton.Yes:
+                return
+            try:
+                state = remote_db.export_state()
+                local_config = self.db.import_sync_state(state)
+                save_config(local_config)
+                self.config = local_config
+                self._refresh_ui()
+                QMessageBox.information(self, "下载完成", "云端存档已覆盖到本机。现在断网也能用单机版继续。")
+            except RemoteApiError as exc:
+                self._show_sync_error(exc)
+            return
+
+        if conflict.choice == "cloud_only":
+            self._switch_to_remote(remote_db)
+            return
 
     def _switch_to_remote(self, remote_db: RemoteDatabaseManager):
         try:

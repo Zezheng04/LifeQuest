@@ -454,3 +454,83 @@ class DatabaseManager:
                     (f"{today_prefix}%", QuestStatus.COMPLETE.value)).fetchone()
                 return row["total"] if row["total"] else 0
             except: return 0
+
+    def import_sync_state(self, state: dict) -> dict:
+        self.create_tables()
+        self.init_player_if_missing()
+
+        player = state.get("player") or {}
+        rival = state.get("rival") or {}
+        quests = state.get("quests") or []
+        rewards = state.get("rewards") or []
+        config = state.get("config") or {}
+
+        with self.get_connection() as conn:
+            conn.execute(
+                """UPDATE player SET level=?, xp=?, next_level_xp=?, gold=?,
+                   perception=?, insight=?, logic=?, charisma=?, streak_days=?, last_active_date=?, streak_freeze_cards=?
+                   WHERE id = 1""",
+                (
+                    int(player.get("level", 1)),
+                    int(player.get("xp", 0)),
+                    int(player.get("next_level_xp", calc_next_level_xp(int(player.get("level", 1))))),
+                    int(player.get("gold", 0)),
+                    float(player.get("perception", 5.0)),
+                    float(player.get("insight", 5.0)),
+                    float(player.get("logic", 5.0)),
+                    float(player.get("charisma", 5.0)),
+                    int(player.get("streak_days", 0)),
+                    str(player.get("last_active_date", "")),
+                    int(player.get("streak_freeze_cards", 0)),
+                )
+            )
+
+            conn.execute(
+                """UPDATE rival SET level=?, xp=?, next_level_xp=?,
+                   perception=?, insight=?, logic=?, charisma=?, last_login_date=?, tier=?
+                   WHERE id = 1""",
+                (
+                    int(rival.get("level", 1)),
+                    int(rival.get("xp", 0)),
+                    int(rival.get("next_level_xp", calc_next_level_xp(int(rival.get("level", 1))))),
+                    float(rival.get("perception", 5.5)),
+                    float(rival.get("insight", 5.5)),
+                    float(rival.get("logic", 5.5)),
+                    float(rival.get("charisma", 5.5)),
+                    str(rival.get("last_login_date") or datetime.now().isoformat()),
+                    str(rival.get("tier") or RivalTier.NORMAL.value),
+                )
+            )
+
+            conn.execute("DELETE FROM quest")
+            conn.execute("DELETE FROM reward")
+
+            for q in quests:
+                conn.execute(
+                    """INSERT INTO quest (name, description, quest_type, attribute, difficulty, status, completed_at, duration, frequency, active_days)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        str(q.get("name", "")),
+                        str(q.get("description", "")),
+                        str(q.get("quest_type", QuestType.DAILY.value)),
+                        str(q.get("attribute", QuestAttribute.OTHER.value)),
+                        int(q.get("difficulty", 1)),
+                        str(q.get("status", QuestStatus.INCOMPLETE.value)),
+                        q.get("completed_at"),
+                        int(q.get("duration", 0)),
+                        str(q.get("frequency", QuestFrequency.ONCE.value)),
+                        str(q.get("active_days", "")),
+                    )
+                )
+
+            for r in rewards:
+                conn.execute(
+                    "INSERT INTO reward (name, cost, description) VALUES (?, ?, ?)",
+                    (
+                        str(r.get("name", "")),
+                        int(r.get("cost", 0)),
+                        str(r.get("description", "")),
+                    ),
+                )
+
+        return config
